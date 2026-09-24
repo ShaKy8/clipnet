@@ -17,8 +17,9 @@ struct paste_req {
   size_t n_ids;
   enum serve_mode mode;
   const char *separator; /* joining several clips; NULL: the setting */
-  const char *text;      /* when set, paste this text instead of the clips' own
-                            (a Special Paste transform), still credited to ids */
+  const char *text;      /* when set, paste this text instead of the clips' own,
+                            still credited to ids */
+  const char *transform; /* Special Paste: transform the clips' text first */
   bool send_keys;        /* false: only put it on the clipboard (Ctrl+C) */
 };
 

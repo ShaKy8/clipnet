@@ -10,6 +10,7 @@
 #include "app.h"
 #include "capture.h"
 #include "ext-data-control-v1.h"
+#include "hyprland-global-shortcuts-v1.h"
 #include "loop.h"
 #include "util.h"
 
@@ -22,9 +23,55 @@ struct wl {
   struct wl_seat *seat;
   struct ext_data_control_manager_v1 *manager;
   struct ext_data_control_device_v1 *device;
+  struct hyprland_global_shortcuts_manager_v1 *shortcuts;
+  struct wl_shortcut *shortcut_list;
   struct loop_watch *watch;
   bool want_write;
 };
+
+struct wl_shortcut {
+  struct hyprland_global_shortcut_v1 *proxy;
+  char *id;
+  wl_shortcut_cb cb;
+  void *ctx;
+  struct wl_shortcut *next;
+};
+
+static void shortcut_pressed(void *data, struct hyprland_global_shortcut_v1 *s, uint32_t hi, uint32_t lo, uint32_t ns)
+{
+  struct wl_shortcut *sc = data;
+  sc->cb(sc->ctx, sc->id);
+}
+
+static void shortcut_released(void *data, struct hyprland_global_shortcut_v1 *s, uint32_t hi, uint32_t lo, uint32_t ns) {}
+
+static const struct hyprland_global_shortcut_v1_listener shortcut_listener = {
+  .pressed = shortcut_pressed,
+  .released = shortcut_released,
+};
+
+bool wl_has_shortcuts(struct wl *wl)
+{
+  return wl && wl->shortcuts;
+}
+
+struct wl_shortcut *wl_shortcut_register(struct wl *wl, const char *app_id, const char *id, const char *description,
+                                         wl_shortcut_cb cb, void *ctx)
+{
+  if (!wl || !wl->shortcuts) return NULL;
+  for (struct wl_shortcut *s = wl->shortcut_list; s; s = s->next)
+    if (!strcmp(s->id, id)) return s; /* never twice: that is a protocol error */
+  struct wl_shortcut *s = xcalloc(1, sizeof *s);
+  s->id = xstrdup(id);
+  s->cb = cb;
+  s->ctx = ctx;
+  s->proxy = hyprland_global_shortcuts_manager_v1_register_shortcut(wl->shortcuts, id, app_id, description, "");
+  hyprland_global_shortcut_v1_add_listener(s->proxy, &shortcut_listener, s);
+  s->next = wl->shortcut_list;
+  wl->shortcut_list = s;
+  wl_flush(wl);
+  return s;
+}
 
 void wl_offer_destroy(struct wl_offer *o)
 {
@@ -93,6 +140,8 @@ static void registry_global(void *data, struct wl_registry *reg, uint32_t name, 
     wl->seat = wl_registry_bind(reg, name, &wl_seat_interface, 1);
   else if (!strcmp(iface, ext_data_control_manager_v1_interface.name))
     wl->manager = wl_registry_bind(reg, name, &ext_data_control_manager_v1_interface, 1);
+  else if (!strcmp(iface, hyprland_global_shortcuts_manager_v1_interface.name))
+    wl->shortcuts = wl_registry_bind(reg, name, &hyprland_global_shortcuts_manager_v1_interface, 1);
 }
 
 static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t name) {}
@@ -169,6 +218,14 @@ void wl_disconnect(struct wl *wl)
 {
   if (!wl) return;
   if (wl->watch) loop_del_fd(wl->app->loop, wl->watch);
+  while (wl->shortcut_list) {
+    struct wl_shortcut *s = wl->shortcut_list;
+    wl->shortcut_list = s->next;
+    hyprland_global_shortcut_v1_destroy(s->proxy);
+    free(s->id);
+    free(s);
+  }
+  if (wl->shortcuts) hyprland_global_shortcuts_manager_v1_destroy(wl->shortcuts);
   if (wl->device) ext_data_control_device_v1_destroy(wl->device);
   if (wl->manager) ext_data_control_manager_v1_destroy(wl->manager);
   if (wl->seat) wl_seat_destroy(wl->seat);

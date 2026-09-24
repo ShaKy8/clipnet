@@ -29,12 +29,14 @@
 #include "capture.h"
 #include "ctl.h"
 #include "db.h"
+#include "hotkeys.h"
 #include "hypr.h"
 #include "ipc.h"
 #include "loop.h"
 #include "proto.h"
 #include "serve.h"
 #include "settings.h"
+#include "transform.h"
 #include "util.h"
 #include "wl.h"
 
@@ -67,8 +69,17 @@ static void on_retention(void *ctx)
   struct app *app = ctx;
   app->retention_timer = NULL;
   int n = db_retention(app->db, now_ms());
-  if (n > 0) app_emit(app, "clips.reset", NULL);
+  if (n > 0) {
+    hotkeys_prune(app->hotkeys);
+    app_emit(app, "clips.reset", NULL);
+  }
   app->retention_timer = loop_timer(app->loop, RETENTION_EVERY_MS, on_retention, app);
+}
+
+static void on_hypr_reload(void *ctx)
+{
+  /* A config reload drops every runtime bind; put ours back. */
+  hotkeys_sync(ctx);
 }
 
 static void on_window_change(void *ctx)
@@ -127,6 +138,7 @@ int main(int argc, char **argv)
 
   /* Everything we create (database, blobs, socket) is private. */
   umask(077);
+  transform_init_locale();
   signal(SIGPIPE, SIG_IGN);
 
   struct app app = { 0 };
@@ -176,6 +188,10 @@ int main(int argc, char **argv)
   }
   app.ipc = ipc_listen(&app, socket_path);
   if (!app.ipc) return 1;
+  app.hotkeys = hotkeys_new(&app);
+  if (app.hypr) hypr_on_reload(app.hypr, on_hypr_reload, app.hotkeys);
+  hotkeys_prune(app.hotkeys);
+  hotkeys_sync(app.hotkeys);
 
   /* A timed pause that ran out while we were stopped is over. */
   if (setting_bool(app.db, "paused")) {
@@ -192,6 +208,7 @@ int main(int argc, char **argv)
   loop_timer_cancel(app.loop, app.pause_timer);
   ipc_close(app.ipc);
   app.ipc = NULL;
+  hotkeys_free(app.hotkeys);
   capture_free(app.capture);
   serve_free(app.serve);
   hypr_disconnect(app.hypr);

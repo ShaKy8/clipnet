@@ -116,7 +116,7 @@ static void schedule_reap(struct ipc *ipc)
 void ipc_reply(struct ipc_client *c, const cJSON *id, cJSON *result)
 {
   cJSON *m = cJSON_CreateObject();
-  if (id) cJSON_AddItemToObject(m, "id", cJSON_Duplicate(id, 1));
+  if (id) cJSON_AddItemToObject(m, "rid", cJSON_Duplicate(id, 1));
   cJSON_AddTrueToObject(m, "ok");
   cJSON_AddItemToObject(m, "result", result ? result : cJSON_CreateNull());
   send_json(c, m);
@@ -125,7 +125,7 @@ void ipc_reply(struct ipc_client *c, const cJSON *id, cJSON *result)
 void ipc_error(struct ipc_client *c, const cJSON *id, const char *code, const char *message)
 {
   cJSON *m = cJSON_CreateObject();
-  if (id) cJSON_AddItemToObject(m, "id", cJSON_Duplicate(id, 1));
+  if (id) cJSON_AddItemToObject(m, "rid", cJSON_Duplicate(id, 1));
   cJSON_AddFalseToObject(m, "ok");
   cJSON *e = cJSON_AddObjectToObject(m, "error");
   cJSON_AddStringToObject(e, "code", code);

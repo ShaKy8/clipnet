@@ -39,7 +39,8 @@ Singleton {
       return
     }
     const id = nextId++
-    const req = Object.assign({ id: id, op: op }, args || {})
+    // "rid", not "id": operations use "id" for the clip or group.
+    const req = Object.assign({}, args || {}, { rid: id, op: op })
     if (cb) pending[id] = cb
     sock.write(JSON.stringify(req) + "\n")
     sock.flush()
@@ -58,8 +59,8 @@ Singleton {
       root.event(msg.event, msg.data)
       return
     }
-    const cb = pending[msg.id]
-    delete pending[msg.id]
+    const cb = pending[msg.rid]
+    delete pending[msg.rid]
     if (cb) cb(msg.ok ? msg.result : null, msg.ok ? null : msg.error)
   }
 

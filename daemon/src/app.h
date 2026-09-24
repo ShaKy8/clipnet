@@ -24,6 +24,7 @@ struct hypr;
 struct ipc;
 struct capture;
 struct serve;
+struct hotkeys;
 
 struct app {
   struct loop *loop;
@@ -33,6 +34,7 @@ struct app {
   struct ipc *ipc;
   struct capture *capture;
   struct serve *serve;
+  struct hotkeys *hotkeys;
 
   char *runtime_dir;     /* $XDG_RUNTIME_DIR/clipnet */
   char *socket_path;

@@ -1,4 +1,5 @@
 #include "db.h"
+#include "db_internal.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -26,17 +27,12 @@
 #define PLAIN_TEXT_MAX_CHARS 1000000
 #define PREVIEW_CHARS 300
 
-struct db {
-  sqlite3 *h;
-  char *dir;
-  char *blob_dir;
-};
 
 sqlite3 *db_handle(struct db *db) { return db->h; }
 const char *db_dir(struct db *db) { return db->dir; }
 const char *db_blob_dir(struct db *db) { return db->blob_dir; }
 
-static sqlite3_stmt *prep(struct db *db, const char *sql)
+sqlite3_stmt *dbi_prep(struct db *db, const char *sql)
 {
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(db->h, sql, -1, &st, NULL) != SQLITE_OK) {
@@ -46,7 +42,7 @@ static sqlite3_stmt *prep(struct db *db, const char *sql)
   return st;
 }
 
-static int exec(struct db *db, const char *sql)
+int dbi_exec(struct db *db, const char *sql)
 {
   char *err = NULL;
   if (sqlite3_exec(db->h, sql, NULL, NULL, &err) != SQLITE_OK) {
@@ -77,7 +73,7 @@ struct db *db_open(const char *dir)
     return NULL;
   }
   sqlite3_busy_timeout(db->h, 2000);
-  if (exec(db, "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;"
+  if (dbi_exec(db, "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;"
                "PRAGMA secure_delete = ON; PRAGMA temp_store = MEMORY;") < 0 ||
       schema_migrate(db->h) < 0) {
     db_close(db);
@@ -100,10 +96,10 @@ void db_close(struct db *db)
 
 int db_tx(struct db *db, int (*fn)(struct db *db, void *ctx), void *ctx)
 {
-  if (exec(db, "BEGIN IMMEDIATE") < 0) return -1;
+  if (dbi_exec(db, "BEGIN IMMEDIATE") < 0) return -1;
   int rc = fn(db, ctx);
-  if (rc == 0 && exec(db, "COMMIT") == 0) return 0;
-  exec(db, "ROLLBACK");
+  if (rc == 0 && dbi_exec(db, "COMMIT") == 0) return 0;
+  dbi_exec(db, "ROLLBACK");
   return rc ? rc : -1;
 }
 
@@ -118,7 +114,7 @@ static int cmp_fmt_idx(const void *a, const void *b)
 
 /* Identity of a clip: every (mime, bytes) pair, in mime order, so the same
  * content offered in a different order is still the same clip. */
-static void content_hash(const struct clip_in *in, uint8_t out[32])
+void dbi_content_hash(const struct clip_in *in, uint8_t out[32])
 {
   size_t *idx = xmalloc(in->n_fmts * sizeof *idx);
   for (size_t i = 0; i < in->n_fmts; i++) idx[i] = i;
@@ -155,14 +151,8 @@ static char *valid_text(const uint8_t *p, size_t n, size_t *out_len)
   return latin1_to_utf8(p, MIN(n, (size_t)PLAIN_TEXT_MAX_CHARS), out_len);
 }
 
-struct derived {
-  enum clip_kind kind;
-  char *plain; /* NULL when the clip has no text at all */
-  char *preview;
-  int flags;
-};
 
-static void derive(const struct clip_in *in, struct derived *d)
+void dbi_derive(const struct clip_in *in, struct derived *d)
 {
   const char **mimes = xmalloc((in->n_fmts ? in->n_fmts : 1) * sizeof *mimes);
   for (size_t i = 0; i < in->n_fmts; i++) mimes[i] = in->fmts[i].mime;
@@ -235,6 +225,50 @@ static char *aliases_json(const struct fmt_in *f)
   return s;
 }
 
+/* Write a clip's formats: small ones inline, images and big ones as blobs. */
+int dbi_insert_formats(struct db *db, int64_t clip_id, const struct fmt_in *fmts, size_t n)
+{
+  sqlite3_stmt *st = dbi_prep(db, "INSERT INTO clip_formats(clip_id, ord, mime, raw_name, aliases, size, hash, data, blob)"
+                              " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+  if (!st) return -1;
+  for (size_t i = 0; i < n; i++) {
+    const struct fmt_in *f = &fmts[i];
+    uint8_t h[32];
+    sha256(f->data, f->len, h);
+    char name[68];
+    bool as_blob = mime_is_image(f->mime) || f->len > INLINE_MAX;
+    if (as_blob) {
+      blob_name(h, name);
+      if (blob_put(db->blob_dir, name, f->data, f->len) < 0) { sqlite3_finalize(st); return -1; }
+    }
+    char *aj = aliases_json(f);
+    sqlite3_reset(st);
+    sqlite3_bind_int64(st, 1, clip_id);
+    sqlite3_bind_int(st, 2, (int)i);
+    sqlite3_bind_text(st, 3, f->mime, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, f->n_aliases ? f->aliases[0] : f->mime, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 5, aj, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(st, 6, (int64_t)f->len);
+    sqlite3_bind_blob(st, 7, h, 32, SQLITE_TRANSIENT);
+    if (as_blob) {
+      sqlite3_bind_null(st, 8);
+      sqlite3_bind_text(st, 9, name, -1, SQLITE_TRANSIENT);
+    } else {
+      sqlite3_bind_blob64(st, 8, f->len ? f->data : (const void *)"", f->len, SQLITE_STATIC);
+      sqlite3_bind_null(st, 9);
+    }
+    int rc = sqlite3_step(st);
+    free(aj);
+    if (rc != SQLITE_DONE) {
+      log_err("insert format %s: %s", f->mime, sqlite3_errmsg(db->h));
+      sqlite3_finalize(st);
+      return -1;
+    }
+  }
+  sqlite3_finalize(st);
+  return 0;
+}
+
 static int add_tx(struct db *db, void *vctx)
 {
   struct add_ctx *c = vctx;
@@ -243,13 +277,13 @@ static int add_tx(struct db *db, void *vctx)
   int64_t created = in->created_at ? in->created_at : now;
   int64_t used = in->last_used_at ? in->last_used_at : created;
 
-  sqlite3_stmt *st = prep(db, "SELECT id FROM clips WHERE content_hash = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT id FROM clips WHERE content_hash = ?");
   if (!st) return -1;
   sqlite3_bind_blob(st, 1, c->hash, 32, SQLITE_STATIC);
   int64_t existing = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
   sqlite3_finalize(st);
   if (existing) {
-    st = prep(db, "UPDATE clips SET last_used_at = max(last_used_at, ?),"
+    st = dbi_prep(db, "UPDATE clips SET last_used_at = max(last_used_at, ?),"
                   " source_app = coalesce(?, source_app) WHERE id = ?");
     if (!st) return -1;
     sqlite3_bind_int64(st, 1, used);
@@ -268,7 +302,7 @@ static int add_tx(struct db *db, void *vctx)
   size_t total = 0;
   for (size_t i = 0; i < in->n_fmts; i++) total += in->fmts[i].len;
 
-  st = prep(db, "INSERT INTO clips(uuid, created_at, last_used_at, kind, title, preview, plain_text,"
+  st = dbi_prep(db, "INSERT INTO clips(uuid, created_at, last_used_at, kind, title, preview, plain_text,"
                 " content_hash, total_size, source_app, source_title, group_id, flags)"
                 " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
   if (!st) return -1;
@@ -294,44 +328,7 @@ static int add_tx(struct db *db, void *vctx)
   }
   c->id = sqlite3_last_insert_rowid(db->h);
 
-  st = prep(db, "INSERT INTO clip_formats(clip_id, ord, mime, raw_name, aliases, size, hash, data, blob)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
-  if (!st) return -1;
-  for (size_t i = 0; i < in->n_fmts; i++) {
-    const struct fmt_in *f = &in->fmts[i];
-    uint8_t h[32];
-    sha256(f->data, f->len, h);
-    char name[68];
-    bool as_blob = mime_is_image(f->mime) || f->len > INLINE_MAX;
-    if (as_blob) {
-      blob_name(h, name);
-      if (blob_put(db->blob_dir, name, f->data, f->len) < 0) { sqlite3_finalize(st); return -1; }
-    }
-    char *aj = aliases_json(f);
-    sqlite3_reset(st);
-    sqlite3_bind_int64(st, 1, c->id);
-    sqlite3_bind_int(st, 2, (int)i);
-    sqlite3_bind_text(st, 3, f->mime, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 4, f->n_aliases ? f->aliases[0] : f->mime, -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 5, aj, -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(st, 6, (int64_t)f->len);
-    sqlite3_bind_blob(st, 7, h, 32, SQLITE_TRANSIENT);
-    if (as_blob) {
-      sqlite3_bind_null(st, 8);
-      sqlite3_bind_text(st, 9, name, -1, SQLITE_TRANSIENT);
-    } else {
-      sqlite3_bind_blob64(st, 8, f->len ? f->data : (const void *)"", f->len, SQLITE_STATIC);
-      sqlite3_bind_null(st, 9);
-    }
-    rc = sqlite3_step(st);
-    free(aj);
-    if (rc != SQLITE_DONE) {
-      log_err("insert format %s: %s", f->mime, sqlite3_errmsg(db->h));
-      sqlite3_finalize(st);
-      return -1;
-    }
-  }
-  sqlite3_finalize(st);
+  if (dbi_insert_formats(db, c->id, in->fmts, in->n_fmts) < 0) return -1;
   c->result = ADD_NEW;
   return 0;
 }
@@ -340,8 +337,8 @@ enum add_result db_add_clip(struct db *db, const struct clip_in *in, int64_t *id
 {
   if (!in->n_fmts) return ADD_ERR;
   struct add_ctx c = { .in = in, .result = ADD_ERR };
-  content_hash(in, c.hash);
-  derive(in, &c.d);
+  dbi_content_hash(in, c.hash);
+  dbi_derive(in, &c.d);
   int rc = db_tx(db, add_tx, &c);
   free(c.d.plain);
   free(c.d.preview);
@@ -514,7 +511,7 @@ cJSON *db_list(struct db *db, const struct list_query *q)
                                                     " c.sticky_order, c.last_used_at DESC, c.id DESC");
   else buf_append_str(&sql, ORDER_HISTORY);
   buf_append_str(&sql, " LIMIT ? OFFSET ?");
-  sqlite3_stmt *st = prep(db, (char *)sql.data);
+  sqlite3_stmt *st = dbi_prep(db, (char *)sql.data);
   buf_free(&sql);
   if (st) {
     bind_where(st, &w);
@@ -527,7 +524,7 @@ cJSON *db_list(struct db *db, const struct list_query *q)
   }
 
   buf_printf(&sql, "SELECT count(*) FROM clips c%s", (char *)w.sql.data);
-  st = prep(db, (char *)sql.data);
+  st = dbi_prep(db, (char *)sql.data);
   buf_free(&sql);
   int64_t total = 0;
   if (st) {
@@ -547,7 +544,7 @@ int64_t db_id_at_position(struct db *db, int pos)
   build_where(db, &q, &w);
   struct buf sql = { 0 };
   buf_printf(&sql, "SELECT c.id FROM clips c%s" ORDER_HISTORY " LIMIT 1 OFFSET ?", (char *)w.sql.data);
-  sqlite3_stmt *st = prep(db, (char *)sql.data);
+  sqlite3_stmt *st = dbi_prep(db, (char *)sql.data);
   buf_free(&sql);
   int64_t id = 0;
   if (st) {
@@ -562,7 +559,7 @@ int64_t db_id_at_position(struct db *db, int pos)
 
 cJSON *db_row(struct db *db, int64_t id)
 {
-  sqlite3_stmt *st = prep(db, "SELECT " ROW_COLS " FROM clips c WHERE c.id = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT " ROW_COLS " FROM clips c WHERE c.id = ?");
   if (!st) return NULL;
   sqlite3_bind_int64(st, 1, id);
   cJSON *o = sqlite3_step(st) == SQLITE_ROW ? row_json(db, st) : NULL;
@@ -572,7 +569,7 @@ cJSON *db_row(struct db *db, int64_t id)
 
 bool db_exists(struct db *db, int64_t id)
 {
-  sqlite3_stmt *st = prep(db, "SELECT 1 FROM clips WHERE id = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT 1 FROM clips WHERE id = ?");
   if (!st) return false;
   sqlite3_bind_int64(st, 1, id);
   bool r = sqlite3_step(st) == SQLITE_ROW;
@@ -580,9 +577,19 @@ bool db_exists(struct db *db, int64_t id)
   return r;
 }
 
+int64_t db_clip_id_by_uuid(struct db *db, const char *uuid)
+{
+  sqlite3_stmt *st = dbi_prep(db, "SELECT id FROM clips WHERE uuid = ?");
+  if (!st) return 0;
+  sqlite3_bind_text(st, 1, uuid, -1, SQLITE_STATIC);
+  int64_t id = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+  sqlite3_finalize(st);
+  return id;
+}
+
 int db_clip_uuid(struct db *db, int64_t id, char out[37])
 {
-  sqlite3_stmt *st = prep(db, "SELECT uuid FROM clips WHERE id = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT uuid FROM clips WHERE id = ?");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, id);
   int rc = -1;
@@ -649,7 +656,7 @@ void clip_payload_free(struct clip_payload *p)
 int db_load_payload(struct db *db, int64_t id, struct clip_payload *out)
 {
   memset(out, 0, sizeof *out);
-  sqlite3_stmt *st = prep(db, "SELECT uuid FROM clips WHERE id = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT uuid FROM clips WHERE id = ?");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, id);
   if (sqlite3_step(st) != SQLITE_ROW) { sqlite3_finalize(st); return -1; }
@@ -657,7 +664,7 @@ int db_load_payload(struct db *db, int64_t id, struct clip_payload *out)
   sqlite3_finalize(st);
   out->id = id;
 
-  st = prep(db, "SELECT mime, aliases, data, blob FROM clip_formats WHERE clip_id = ? ORDER BY ord");
+  st = dbi_prep(db, "SELECT mime, aliases, data, blob FROM clip_formats WHERE clip_id = ? ORDER BY ord");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, id);
   size_t cap = 0;
@@ -693,7 +700,7 @@ int db_load_payload(struct db *db, int64_t id, struct clip_payload *out)
 
 char *db_clip_text(struct db *db, int64_t id, size_t *len)
 {
-  sqlite3_stmt *st = prep(db, "SELECT f.data, f.blob, c.plain_text FROM clips c"
+  sqlite3_stmt *st = dbi_prep(db, "SELECT f.data, f.blob, c.plain_text FROM clips c"
                               " LEFT JOIN clip_formats f ON f.clip_id = c.id AND f.mime = '" MIME_TEXT "'"
                               "  AND (c.flags & 1) = 0"
                               " WHERE c.id = ?");
@@ -722,7 +729,7 @@ cJSON *db_get(struct db *db, int64_t id)
   cJSON *o = db_row(db, id);
   if (!o) return NULL;
   cJSON *fmts = cJSON_AddArrayToObject(o, "formats");
-  sqlite3_stmt *st = prep(db, "SELECT mime, size, aliases, blob FROM clip_formats WHERE clip_id = ? ORDER BY ord");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT mime, size, aliases, blob FROM clip_formats WHERE clip_id = ? ORDER BY ord");
   if (st) {
     sqlite3_bind_int64(st, 1, id);
     while (sqlite3_step(st) == SQLITE_ROW) {
@@ -760,7 +767,7 @@ struct del_ctx {
 static int del_tx(struct db *db, void *vctx)
 {
   struct del_ctx *c = vctx;
-  sqlite3_stmt *st = prep(db, "SELECT DISTINCT blob FROM clip_formats WHERE clip_id = ? AND blob IS NOT NULL");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT DISTINCT blob FROM clip_formats WHERE clip_id = ? AND blob IS NOT NULL");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, c->id);
   while (sqlite3_step(st) == SQLITE_ROW) {
@@ -768,7 +775,7 @@ static int del_tx(struct db *db, void *vctx)
     c->blobs[c->n_blobs++] = xstrdup((const char *)sqlite3_column_text(st, 0));
   }
   sqlite3_finalize(st);
-  st = prep(db, "DELETE FROM clips WHERE id = ?");
+  st = dbi_prep(db, "DELETE FROM clips WHERE id = ?");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, c->id);
   int rc = sqlite3_step(st) == SQLITE_DONE ? 0 : -1;
@@ -777,9 +784,9 @@ static int del_tx(struct db *db, void *vctx)
   return rc;
 }
 
-static bool blob_referenced(struct db *db, const char *name)
+bool dbi_blob_referenced(struct db *db, const char *name)
 {
-  sqlite3_stmt *st = prep(db, "SELECT 1 FROM clip_formats WHERE blob = ? LIMIT 1");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT 1 FROM clip_formats WHERE blob = ? LIMIT 1");
   if (!st) return true; /* when unsure, keep the file */
   sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
   bool r = sqlite3_step(st) == SQLITE_ROW;
@@ -792,7 +799,7 @@ int db_delete(struct db *db, int64_t id)
   struct del_ctx c = { .id = id };
   int rc = db_tx(db, del_tx, &c);
   for (size_t i = 0; i < c.n_blobs; i++) {
-    if (rc == 0 && !blob_referenced(db, c.blobs[i])) blob_unlink(db->blob_dir, c.blobs[i]);
+    if (rc == 0 && !dbi_blob_referenced(db, c.blobs[i])) blob_unlink(db->blob_dir, c.blobs[i]);
     free(c.blobs[i]);
   }
   free(c.blobs);
@@ -801,7 +808,7 @@ int db_delete(struct db *db, int64_t id)
 
 int db_touch(struct db *db, int64_t id, bool pasted)
 {
-  sqlite3_stmt *st = prep(db, "UPDATE clips SET last_used_at = ?, paste_count = paste_count + ? WHERE id = ?");
+  sqlite3_stmt *st = dbi_prep(db, "UPDATE clips SET last_used_at = ?, paste_count = paste_count + ? WHERE id = ?");
   if (!st) return -1;
   sqlite3_bind_int64(st, 1, now_ms());
   sqlite3_bind_int(st, 2, pasted ? 1 : 0);
@@ -813,7 +820,7 @@ int db_touch(struct db *db, int64_t id, bool pasted)
 
 char *db_setting_raw(struct db *db, const char *key)
 {
-  sqlite3_stmt *st = prep(db, "SELECT value FROM settings WHERE key = ?");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT value FROM settings WHERE key = ?");
   if (!st) return NULL;
   sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
   char *v = sqlite3_step(st) == SQLITE_ROW ? xstrdup((const char *)sqlite3_column_text(st, 0)) : NULL;
@@ -823,7 +830,7 @@ char *db_setting_raw(struct db *db, const char *key)
 
 int db_setting_put(struct db *db, const char *key, const char *json)
 {
-  sqlite3_stmt *st = prep(db, "INSERT INTO settings(key, value) VALUES (?, ?)"
+  sqlite3_stmt *st = dbi_prep(db, "INSERT INTO settings(key, value) VALUES (?, ?)"
                               " ON CONFLICT(key) DO UPDATE SET value = excluded.value");
   if (!st) return -1;
   sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC);
@@ -850,7 +857,7 @@ struct ret_ctx {
 
 static int ret_step(struct db *db, const char *sql, int64_t a, int64_t b, int nparams)
 {
-  sqlite3_stmt *st = prep(db, sql);
+  sqlite3_stmt *st = dbi_prep(db, sql);
   if (!st) return -1;
   if (nparams > 0) sqlite3_bind_int64(st, 1, a);
   if (nparams > 1) sqlite3_bind_int64(st, 2, b);
@@ -921,7 +928,7 @@ int db_blob_gc(struct db *db)
         char *name = xasprintf("%s/%s", de->d_name, fe->d_name);
         /* Leftover temp files from an interrupted write are always garbage. */
         bool tmp = strstr(fe->d_name, ".tmp.") != NULL;
-        if (tmp || !blob_referenced(db, name)) {
+        if (tmp || !dbi_blob_referenced(db, name)) {
           if (blob_unlink(db->blob_dir, name) == 0) removed++;
         }
         free(name);
@@ -938,13 +945,13 @@ int db_blob_gc(struct db *db)
 cJSON *db_stats(struct db *db)
 {
   cJSON *o = cJSON_CreateObject();
-  sqlite3_stmt *st = prep(db, "SELECT count(*), coalesce(sum(total_size), 0) FROM clips");
+  sqlite3_stmt *st = dbi_prep(db, "SELECT count(*), coalesce(sum(total_size), 0) FROM clips");
   if (st && sqlite3_step(st) == SQLITE_ROW) {
     cJSON_AddNumberToObject(o, "count", (double)sqlite3_column_int64(st, 0));
     cJSON_AddNumberToObject(o, "content_bytes", (double)sqlite3_column_int64(st, 1));
   }
   sqlite3_finalize(st);
-  st = prep(db, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()");
+  st = dbi_prep(db, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()");
   if (st && sqlite3_step(st) == SQLITE_ROW) cJSON_AddNumberToObject(o, "db_bytes", (double)sqlite3_column_int64(st, 0));
   sqlite3_finalize(st);
   cJSON_AddNumberToObject(o, "schema", schema_version_latest());

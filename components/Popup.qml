@@ -3,6 +3,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.common
+import "ui"
 
 // The clipboard history popup: Ditto's list, in the Omarchy theme.
 //
@@ -11,23 +12,37 @@ import qs.common
 // outside the card closes it. Keyboard focus is exclusive while open, and
 // focus returns to the previous window as soon as the surface unmaps, which
 // is what the daemon waits for before it sends the paste keystroke.
+//
+// Views: History (every clip), Groups (Ctrl+G: the top-level groups), and a
+// group (its subgroups, then its clips). Dialogs and menus are drawn inside
+// the card and hold the keyboard while they are open.
 PanelWindow {
   id: popup
 
+  signal settingsRequested()
+
   property bool open: false
-  property var rows: []
+  property var rows: []          // group rows ({isGroup: true, ...}) then clip rows
+  property int groupRows: 0
   property int total: 0
   property string query: ""
   property bool previewOpen: false
   property var detail: null
   property bool stale: true
   property string offlineText: ""
-  // Rows picked with Ctrl/Shift for a multi-paste, by clip id.
-  property var picked: ({})
+  property var picked: ({})      // clip ids picked for a multi-paste
   property int pickAnchor: -1
   property real cardX: 0
   property real cardY: 0
   property var lastPos: ({})
+
+  // Where we are: History (groupId 0, !groupsRoot), the Groups list, or a group.
+  property int groupId: 0
+  property bool groupsRoot: false
+  property var groups: []
+  property var transforms: []
+
+  property Item overlay: null    // the open dialog or menu, if any
 
   readonly property int rowHeight: Math.round(Theme.fontSize * 2)
   readonly property int visibleRows: Daemon.setting("popup_rows", 14)
@@ -35,6 +50,7 @@ PanelWindow {
   readonly property int paneWidth: Theme.px(440)
   readonly property int pad: Theme.px(8)
   readonly property var currentRow: rows.length ? rows[Math.max(0, Math.min(list.currentIndex, rows.length - 1))] : null
+  readonly property var currentClip: currentRow && !currentRow.isGroup ? currentRow : null
 
   visible: open
   color: "transparent"
@@ -51,13 +67,16 @@ PanelWindow {
   function show() {
     Daemon.call("show_context", {}, (ctx, err) => {
       place(ctx || {})
+      closeOverlay()
       search.text = ""
       query = ""
       picked = {}
       pickAnchor = -1
-      list.currentIndex = 0
+      groupId = 0
+      groupsRoot = false
       offlineText = err ? "clipnetd is not running — start it with: clipnet start" : ""
-      if (stale || !rows.length) refresh(true)
+      refresh(true)
+      loadGroups()
       open = true
       search.forceActiveFocus()
       ticker.now = Date.now()
@@ -66,6 +85,7 @@ PanelWindow {
 
   function hide() {
     if (!open) return
+    closeOverlay()
     lastPos[screen ? screen.name : ""] = { x: cardX, y: cardY }
     open = false
   }
@@ -98,28 +118,53 @@ PanelWindow {
 
   // ---- data ----------------------------------------------------------------
 
+  function childGroups(parent) {
+    return groups.filter(g => (g.parent_id || 0) === parent).map(g => Object.assign({ isGroup: true }, g))
+  }
+
   function refresh(resetSelection) {
-    const keepId = currentRow ? currentRow.id : -1
-    Daemon.call("list", { query: query, limit: 300 }, (r, err) => {
-      if (!r) return
+    const keepId = currentRow ? (currentRow.isGroup ? "g" : "c") + currentRow.id : ""
+    const gRows = groupsRoot ? childGroups(0) : groupId ? childGroups(groupId) : []
+    const done = (clips, count) => {
       stale = false
-      rows = r.rows
-      total = r.total
+      rows = gRows.concat(clips)
+      groupRows = gRows.length
+      total = count
       let idx = 0
-      if (!resetSelection && keepId >= 0) {
-        const found = rows.findIndex(x => x.id === keepId)
+      if (!resetSelection && keepId) {
+        const found = rows.findIndex(x => (x.isGroup ? "g" : "c") + x.id === keepId)
         if (found >= 0) idx = found
       }
       list.currentIndex = Math.min(idx, Math.max(0, rows.length - 1))
       if (previewOpen) loadDetail()
+    }
+    if (groupsRoot && !query) { done([], 0); return }
+    // Searching in the Groups list looks through every clip.
+    const args = { query: query, limit: 300 }
+    if (groupId && !groupsRoot) args.group = groupId
+    Daemon.call("list", args, (r) => { if (r) done(r.rows, r.total) })
+  }
+
+  function loadGroups(then) {
+    Daemon.call("groups.list", {}, (g) => {
+      if (g) groups = g
+      if (then) then()
     })
   }
 
   function loadDetail() {
-    const row = currentRow
+    const row = currentClip
     if (!row) { detail = null; return }
     if (detail && detail.id === row.id) return
-    Daemon.call("get", { id: row.id }, (d) => { if (d && currentRow && d.id === currentRow.id) detail = d })
+    Daemon.call("get", { id: row.id }, (d) => { if (d && currentClip && d.id === currentClip.id) detail = d })
+  }
+
+  function groupPath(id) {
+    const byId = {}
+    for (const g of groups) byId[g.id] = g
+    const parts = []
+    for (let g = byId[id], n = 0; g && n < 64; g = byId[g.parent_id], n++) parts.unshift(g.name)
+    return parts
   }
 
   Connections {
@@ -132,70 +177,248 @@ PanelWindow {
         eventRefresh.interval = popup.open ? 60 : 400
         eventRefresh.restart()
         if (name === "clip.deleted" && detail && detail.id === data.id) detail = null
+      } else if (name === "groups.changed") {
+        popup.loadGroups(() => { if (popup.open) eventRefresh.restart() })
       }
     }
-    function onConnectedAgain() { popup.stale = true; eventRefresh.restart() }
+    function onConnectedAgain() {
+      popup.stale = true
+      eventRefresh.restart()
+      popup.loadGroups()
+      Daemon.call("transforms.list", {}, t => { if (t) popup.transforms = t })
+    }
   }
   Timer { id: eventRefresh; interval: 400; onTriggered: popup.refresh(false) }
   Timer { id: searchDebounce; interval: 25; onTriggered: popup.refresh(true) }
   Timer { id: detailDebounce; interval: 40; onTriggered: popup.loadDetail() }
   Timer { id: ticker; property real now: Date.now(); interval: 30000; repeat: true; running: popup.open; onTriggered: now = Date.now() }
 
-  // ---- actions -------------------------------------------------------------
+  // ---- navigation ----------------------------------------------------------
 
-  // Ids to act on: the picked rows in list order, or else the current row.
-  function targetIds() {
-    const ids = rows.filter(r => picked[r.id]).map(r => r.id)
-    if (ids.length) return ids
-    return currentRow ? [currentRow.id] : []
+  function enterGroup(id) {
+    groupId = id
+    groupsRoot = false
+    picked = {}
+    search.text = ""
+    query = ""
+    refresh(true)
   }
 
-  function paste(ids, mode) {
+  function up() {
+    if (groupId) {
+      const g = groups.find(x => x.id === groupId)
+      const parent = g ? (g.parent_id || 0) : 0
+      const from = groupId
+      if (parent) enterGroup(parent)
+      else { groupId = 0; groupsRoot = true; refresh(true) }
+      // Land on the group we came out of.
+      Qt.callLater(() => {
+        const i = rows.findIndex(r => r.isGroup && r.id === from)
+        if (i >= 0) list.currentIndex = i
+      })
+    } else if (groupsRoot) {
+      groupsRoot = false
+      refresh(true)
+    }
+  }
+
+  function toggleGroups() {
+    picked = {}
+    if (groupsRoot || groupId) { groupsRoot = false; groupId = 0 }
+    else groupsRoot = true
+    search.text = ""
+    query = ""
+    refresh(true)
+  }
+
+  // ---- actions -------------------------------------------------------------
+
+  // Clip ids to act on: the picked clips in list order, or the current clip.
+  function targetIds() {
+    const ids = rows.filter(r => !r.isGroup && picked[r.id]).map(r => r.id)
+    if (ids.length) return ids
+    return currentClip ? [currentClip.id] : []
+  }
+
+  function report(r, err) { if (err) notify(err.message) }
+
+  function paste(ids, mode, transform) {
     if (!ids.length) return
     hide()
-    Daemon.call("paste", { ids: ids, mode: mode || "normal" }, (r, err) => { if (err) notify(err.message) })
+    const args = { ids: ids, mode: mode || "normal" }
+    if (transform) args.transform = transform
+    Daemon.call("paste", args, report)
   }
 
   function copyOnly(ids) {
     if (!ids.length) return
     hide()
-    Daemon.call("copy", { ids: ids }, (r, err) => { if (err) notify(err.message) })
+    Daemon.call("copy", { ids: ids }, report)
   }
 
+  function activate(mode) {
+    const r = currentRow
+    if (r && r.isGroup && !Object.keys(picked).length) { enterGroup(r.id); return }
+    paste(targetIds(), mode)
+  }
+
+  // Ctrl+1..0 count clips only: group rows above them are not numbered.
   function pastePosition(n) {
-    if (n < rows.length) paste([rows[n].id], "normal")
+    const i = groupRows + n
+    if (i < rows.length) paste([rows[i].id], "normal")
   }
 
   function deleteTargets() {
+    const r = currentRow
+    if (r && r.isGroup && !Object.keys(picked).length) { confirmDeleteGroup(r); return }
     const ids = targetIds()
     if (!ids.length) return
-    const at = list.currentIndex
-    Daemon.call("delete", { ids: ids }, () => {
-      picked = {}
-      refresh(false)
-      list.currentIndex = Math.min(at, Math.max(0, rows.length - 2))
+    const run = () => {
+      const at = list.currentIndex
+      Daemon.call("delete", { ids: ids }, () => {
+        picked = {}
+        refresh(false)
+        list.currentIndex = Math.min(at, Math.max(0, rows.length - 2))
+      })
+    }
+    if (ids.length > 1) {
+      openOverlay(confirmComp, { title: "Delete clips", message: "Delete " + ids.length + " clips?", okText: "Delete", danger: true },
+                  o => { o.confirmed.connect(() => { closeOverlay(); run() }) })
+    } else run()
+  }
+
+  function toggleSticky() {
+    const c = currentClip
+    if (!c) return
+    Daemon.call("update", { id: c.id, sticky: c.sticky ? false : "top" }, report)
+  }
+
+  function toggleLock() {
+    const c = currentClip
+    if (!c) return
+    Daemon.call("update", { id: c.id, locked: !c.locked }, report)
+  }
+
+  // Alt+↑/↓: move a sticky clip among the sticky clips.
+  function moveSticky(dir) {
+    const c = currentClip
+    if (!c || !c.sticky) return
+    const sticky = rows.filter(r => !r.isGroup && r.sticky).map(r => r.id)
+    const i = sticky.indexOf(c.id), j = i + dir
+    if (i < 0 || j < 0 || j >= sticky.length) return
+    sticky[i] = sticky[j]
+    sticky[j] = c.id
+    Daemon.call("reorder_sticky", { ids: sticky }, report)
+    list.currentIndex = Math.max(0, Math.min(rows.length - 1, list.currentIndex + dir))
+  }
+
+  function newGroup(fromSelection) {
+    const ids = fromSelection ? targetIds() : []
+    const parent = groupsRoot ? 0 : groupId
+    openOverlay(promptComp, { title: fromSelection ? "New group from " + ids.length + (ids.length === 1 ? " clip" : " clips") : "New group",
+                              label: parent ? "Inside " + groupPath(parent).join(" ▸ ") : "Name", okText: "Create" }, o => {
+      o.accepted.connect(name => {
+        Daemon.call("groups.create", { name: name, parent: parent }, (r, err) => {
+          if (err) { o.error = err.message; return }
+          closeOverlay()
+          if (ids.length) Daemon.call("move", { ids: ids, group: r.id }, report)
+          picked = {}
+        })
+      })
     })
   }
 
-  function move(delta) {
-    if (!rows.length) return
-    list.currentIndex = Math.max(0, Math.min(rows.length - 1, list.currentIndex + delta))
+  function renameGroup(g) {
+    openOverlay(promptComp, { title: "Rename group", label: "Name", initial: g.name, okText: "Rename" }, o => {
+      o.accepted.connect(name => {
+        Daemon.call("groups.rename", { id: g.id, name: name }, (r, err) => {
+          if (err) { o.error = err.message; return }
+          closeOverlay()
+        })
+      })
+    })
   }
 
-  function togglePick(index) {
-    const r = rows[index]
-    if (!r) return
-    const next = Object.assign({}, picked)
-    if (next[r.id]) delete next[r.id]
-    else next[r.id] = true
-    picked = next
-    pickAnchor = index
+  function confirmDeleteGroup(g) {
+    const sub = groups.filter(x => x.parent_id === g.id).length
+    openOverlay(confirmComp, {
+      title: "Delete group “" + g.name + "”",
+      message: "Its clips" + (sub ? " (and those in its " + sub + " subgroup" + (sub > 1 ? "s" : "") + ")" : "") +
+               " go back to plain history. Or delete them too.",
+      okText: "Delete group", altText: "Delete clips too", danger: true,
+    }, o => {
+      const run = cascade => Daemon.call("groups.delete", { id: g.id, cascade: cascade }, (r, err) => { closeOverlay(); report(r, err) })
+      o.confirmed.connect(() => run(false))
+      o.alternative.connect(() => run(true))
+    })
   }
 
-  function pickRange(from, to) {
-    const next = Object.assign({}, picked)
-    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) if (rows[i]) next[rows[i].id] = true
-    picked = next
+  function moveTo(groupTarget) {
+    const ids = targetIds()
+    if (!ids.length) return
+    Daemon.call("move", { ids: ids, group: groupTarget }, (r, err) => { picked = {}; report(r, err) })
+  }
+
+  function editClip(isNew) {
+    const open = (clip, text) => openOverlay(editorComp, { clip: clip, initialText: text }, o => {
+      o.saved.connect(t => {
+        if (clip) {
+          Daemon.call("set_text", { id: clip.id, text: t }, (r, err) => { if (err) o.error = err.message; else closeOverlay() })
+        } else {
+          Daemon.call("create", { text: t }, (r, err) => {
+            if (err) { o.error = err.message; return }
+            if (groupId && !groupsRoot) Daemon.call("move", { ids: [r.id], group: groupId }, report)
+            closeOverlay()
+          })
+        }
+      })
+    })
+    if (isNew) { open(null, ""); return }
+    const c = currentClip
+    if (!c) return
+    Daemon.call("get", { id: c.id }, (d, err) => {
+      if (!d) return report(null, err)
+      if (d.text === null) { notify("This clip has no text to edit."); return }
+      open(d, d.text)
+    })
+  }
+
+  function properties() {
+    const c = currentClip
+    if (!c) return
+    openOverlay(propsComp, { clip: c, groups: groups }, o => {
+      o.save.connect(f => applyProperties(c, f, o))
+    })
+  }
+
+  // Apply the properties dialog's fields one request at a time, stopping at
+  // the first refusal (a taken quick-paste word or hotkey) with its message.
+  function applyProperties(c, f, dialog) {
+    const steps = []
+    const upd = {}
+    if ((c.title || "") !== f.title.trim()) upd.title = f.title
+    if ((c.quick_paste || "") !== f.quick_paste.trim()) upd.quick_paste = f.quick_paste
+    if (c.locked !== f.locked) upd.locked = f.locked
+    if (c.sticky !== f.sticky) upd.sticky = f.sticky ? "top" : false
+    if (Object.keys(upd).length) steps.push(cb => Daemon.call("update", Object.assign({ id: c.id }, upd), cb))
+    if ((c.group_id || 0) !== f.group) steps.push(cb => Daemon.call("move", { ids: [c.id], group: f.group }, cb))
+    if ((c.hotkey || "") !== f.hotkey) {
+      steps.push(cb => Daemon.call("hotkeys.list", {}, (list, err) => {
+        if (err) return cb(null, err)
+        const existing = list.find(h => h.action === "paste_clip" && h.arg === c.uuid)
+        if (!f.hotkey) {
+          if (existing) Daemon.call("hotkeys.remove", { id: existing.id }, cb)
+          else cb(null, null)
+        } else {
+          Daemon.call("hotkeys.set", { id: existing ? existing.id : 0, accel: f.hotkey, action: "paste_clip", arg: c.uuid }, cb)
+        }
+      }))
+    }
+    const next = i => {
+      if (i >= steps.length) { closeOverlay(); return }
+      steps[i]((r, err) => { if (err) dialog.error = err.message; else next(i + 1) })
+    }
+    next(0)
   }
 
   function notify(msg) {
@@ -206,7 +429,134 @@ PanelWindow {
 
   onPreviewOpenChanged: if (previewOpen) loadDetail()
 
+  // ---- dialogs and menus ---------------------------------------------------
+
+  Component { id: confirmComp; Confirm {} }
+  Component { id: promptComp; Prompt {} }
+  Component { id: editorComp; ClipEditor {} }
+  Component { id: propsComp; Properties {} }
+  Component { id: menuComp; Menu {} }
+
+  function openOverlay(comp, props, wire) {
+    closeOverlay()
+    const o = comp.createObject(card, props)
+    if (!o) { console.warn("clipnet: could not open a dialog"); return }
+    if (o.cancelled) o.cancelled.connect(closeOverlay)
+    if (o.closed) o.closed.connect(closeOverlay)
+    if (wire) wire(o)
+    overlay = o
+    if (o.focusMenu) o.focusMenu()
+  }
+
+  function closeOverlay() {
+    if (!overlay) return
+    const o = overlay
+    overlay = null
+    o.destroy()
+    if (open) search.forceActiveFocus()
+  }
+
+  function menuAt(items, x, y) {
+    openOverlay(menuComp, { items: items, px: x, py: y }, o => {
+      o.triggered.connect((action, data) => { closeOverlay(); runAction(action, data) })
+    })
+  }
+
+  function specialPasteItems() {
+    return transforms.map(t => ({ label: t.label, action: "transform", data: t.id }))
+  }
+
+  function groupItems() {
+    const items = [{ label: "History only (no group)", action: "move", data: 0 }]
+    for (const g of groups) items.push({ label: groupPath(g.id).join(" ▸ "), action: "move", data: g.id })
+    items.push({ separator: true })
+    items.push({ label: "New group from selection…", action: "group-from-selection", shortcut: "F7" })
+    return items
+  }
+
+  // The context menu for the current row (Menu key, Shift+F10, right-click).
+  function contextMenu(x, y) {
+    const r = currentRow
+    if (!r) return
+    if (r.isGroup) {
+      menuAt([
+        { label: "Open", action: "open", shortcut: "Enter" },
+        { label: "Rename…", action: "rename", shortcut: "F2" },
+        { label: "New group inside…", action: "new-group-in" },
+        { separator: true },
+        { label: "Delete group…", action: "delete", shortcut: "Del" },
+      ], x, y)
+      return
+    }
+    const n = targetIds().length
+    const one = n === 1
+    menuAt([
+      { label: n > 1 ? "Paste " + n + " clips" : "Paste", action: "paste", shortcut: "Enter" },
+      { label: "Paste as plain text", action: "paste-plain", shortcut: "Shift+Enter" },
+      { label: "Special Paste", submenu: specialPasteItems() },
+      { label: "Copy (don't paste)", action: "copy", shortcut: "Ctrl+C" },
+      { separator: true },
+      { label: "Edit…", action: "edit", shortcut: "Ctrl+E", enabled: one },
+      { label: "Properties…", action: "properties", shortcut: "Alt+Enter", enabled: one },
+      { label: currentClip.sticky ? "Unstick" : "Make sticky", action: "sticky", shortcut: "Ctrl+S", enabled: one },
+      { label: currentClip.locked ? "Allow auto-delete" : "Never auto-delete", action: "lock", shortcut: "Ctrl+L", enabled: one },
+      { label: "Move to group", submenu: groupItems() },
+      { separator: true },
+      { label: "New clip…", action: "new", shortcut: "Ctrl+N" },
+      { label: "Delete", action: "delete", shortcut: "Del" },
+    ], x, y)
+  }
+
+  function contextMenuAtCurrent() {
+    const item = list.itemAtIndex(list.currentIndex)
+    const p = item ? item.mapToItem(card, Theme.px(40), item.height) : Qt.point(listBox.x + Theme.px(40), listBox.y)
+    contextMenu(p.x, p.y)
+  }
+
+  function runAction(action, data) {
+    switch (action) {
+    case "paste": activate("normal"); break
+    case "paste-plain": paste(targetIds(), "plain"); break
+    case "transform": paste(targetIds(), "normal", data); break
+    case "copy": copyOnly(targetIds()); break
+    case "edit": editClip(false); break
+    case "new": editClip(true); break
+    case "properties": properties(); break
+    case "sticky": toggleSticky(); break
+    case "lock": toggleLock(); break
+    case "move": moveTo(data); break
+    case "group-from-selection": newGroup(true); break
+    case "open": if (currentRow && currentRow.isGroup) enterGroup(currentRow.id); break
+    case "rename": if (currentRow && currentRow.isGroup) renameGroup(currentRow); break
+    case "new-group-in":
+      if (currentRow && currentRow.isGroup) { enterGroup(currentRow.id); Qt.callLater(() => newGroup(false)) }
+      break
+    case "delete": deleteTargets(); break
+    }
+  }
+
   // ---- keys ----------------------------------------------------------------
+
+  function move(delta) {
+    if (!rows.length) return
+    list.currentIndex = Math.max(0, Math.min(rows.length - 1, list.currentIndex + delta))
+  }
+
+  function togglePick(index) {
+    const r = rows[index]
+    if (!r || r.isGroup) return
+    const next = Object.assign({}, picked)
+    if (next[r.id]) delete next[r.id]
+    else next[r.id] = true
+    picked = next
+    pickAnchor = index
+  }
+
+  function pickRange(from, to) {
+    const next = Object.assign({}, picked)
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) if (rows[i] && !rows[i].isGroup) next[rows[i].id] = true
+    picked = next
+  }
 
   function handleKey(e) {
     const ctrl = e.modifiers & Qt.ControlModifier
@@ -217,12 +567,16 @@ PanelWindow {
     if (k === Qt.Key_Escape) {
       if (search.text && Daemon.setting("esc_clears_search", true) && !shift) search.text = ""
       else hide()
+    } else if (alt && (k === Qt.Key_Return || k === Qt.Key_Enter)) {
+      properties()
     } else if (k === Qt.Key_Return || k === Qt.Key_Enter) {
-      paste(targetIds(), shift ? "plain" : "normal")
-    } else if (ctrl && k >= Qt.Key_1 && k <= Qt.Key_9) {
+      activate(shift ? "plain" : "normal")
+    } else if (ctrl && !shift && k >= Qt.Key_1 && k <= Qt.Key_9) {
       pastePosition(k - Qt.Key_1)
-    } else if (ctrl && k === Qt.Key_0) {
+    } else if (ctrl && !shift && k === Qt.Key_0) {
       pastePosition(9)
+    } else if (alt && (k === Qt.Key_Up || k === Qt.Key_Down)) {
+      moveSticky(k === Qt.Key_Up ? -1 : 1)
     } else if (k === Qt.Key_Down) {
       if (shift) { if (pickAnchor < 0) pickAnchor = list.currentIndex; move(1); pickRange(pickAnchor, list.currentIndex) }
       else move(1)
@@ -245,6 +599,31 @@ PanelWindow {
       pane.wrap = !pane.wrap
     } else if (k === Qt.Key_Delete && (!search.text || search.cursorPosition >= search.text.length)) {
       deleteTargets()
+    } else if (k === Qt.Key_Backspace && !search.text && (groupId || groupsRoot)) {
+      up()
+    } else if (ctrl && k === Qt.Key_G) {
+      toggleGroups()
+    } else if (k === Qt.Key_F7) {
+      newGroup(!ctrl)
+    } else if (k === Qt.Key_F2 && currentRow && currentRow.isGroup) {
+      renameGroup(currentRow)
+    } else if (ctrl && k === Qt.Key_E) {
+      editClip(false)
+    } else if (ctrl && k === Qt.Key_N) {
+      editClip(true)
+    } else if (ctrl && k === Qt.Key_S) {
+      toggleSticky()
+    } else if (ctrl && k === Qt.Key_L) {
+      toggleLock()
+    } else if (ctrl && shift && k === Qt.Key_V) {
+      const item = list.itemAtIndex(list.currentIndex)
+      const p = item ? item.mapToItem(card, Theme.px(40), item.height) : Qt.point(listBox.x, listBox.y)
+      if (targetIds().length) menuAt(specialPasteItems(), p.x, p.y)
+    } else if (k === Qt.Key_Menu || (shift && k === Qt.Key_F10)) {
+      contextMenuAtCurrent()
+    } else if (ctrl && k === Qt.Key_Comma) {
+      hide()
+      settingsRequested()
     } else if (alt && k === Qt.Key_C) {
       search.text = ""
     } else if (ctrl && k === Qt.Key_C && !search.selectedText) {
@@ -324,7 +703,7 @@ PanelWindow {
         Text {
           visible: !search.text
           anchors.verticalCenter: parent.verticalCenter
-          text: "Search clips…"
+          text: popup.groupsRoot ? "Search all clips…" : popup.groupId ? "Search this group…" : "Search clips…"
           color: Theme.dim
           font: search.font
         }
@@ -363,21 +742,62 @@ PanelWindow {
         highlightFollowsCurrentItem: false
         keyNavigationEnabled: false
         cacheBuffer: popup.rowHeight * 20
-        onCurrentIndexChanged: if (popup.previewOpen) detailDebounce.restart()
+        onCurrentIndexChanged: {
+          positionViewAtIndex(currentIndex, ListView.Contain)
+          if (popup.previewOpen) detailDebounce.restart()
+        }
 
-        delegate: ClipRow {
-          current: index === list.currentIndex
-          selected: !!popup.picked[modelData.id]
-          lineHeight: popup.rowHeight
-          now: ticker.now
-          showThumbnails: Daemon.setting("show_thumbnails", true)
-          onClicked: mouse => {
-            if (mouse.modifiers & Qt.ControlModifier) popup.togglePick(index)
-            else if (mouse.modifiers & Qt.ShiftModifier) popup.pickRange(popup.pickAnchor < 0 ? list.currentIndex : popup.pickAnchor, index)
-            else { popup.picked = {}; popup.pickAnchor = index }
-            list.currentIndex = index
+        delegate: Loader {
+          id: rowLoader
+          required property int index
+          required property var modelData
+          width: list.width
+          sourceComponent: modelData.isGroup ? groupRow : clipRow
+
+          Component {
+            id: groupRow
+            GroupRow {
+              width: list.width
+              index: rowLoader.index
+              modelData: rowLoader.modelData
+              current: rowLoader.index === list.currentIndex
+              lineHeight: popup.rowHeight
+              onClicked: list.currentIndex = rowLoader.index
+              onDoubleClicked: popup.enterGroup(rowLoader.modelData.id)
+              onRightClicked: {
+                list.currentIndex = rowLoader.index
+                const p = mapToItem(card, Theme.px(40), height)
+                popup.contextMenu(p.x, p.y)
+              }
+            }
           }
-          onDoubleClicked: popup.paste([modelData.id], "normal")
+          Component {
+            id: clipRow
+            ClipRow {
+              width: list.width
+              index: rowLoader.index
+              modelData: rowLoader.modelData
+              position: rowLoader.index - popup.groupRows
+              current: rowLoader.index === list.currentIndex
+              selected: !!popup.picked[rowLoader.modelData.id]
+              lineHeight: popup.rowHeight
+              now: ticker.now
+              showThumbnails: Daemon.setting("show_thumbnails", true)
+              onClicked: mouse => {
+                if (mouse.modifiers & Qt.ControlModifier) popup.togglePick(rowLoader.index)
+                else if (mouse.modifiers & Qt.ShiftModifier) popup.pickRange(popup.pickAnchor < 0 ? list.currentIndex : popup.pickAnchor, rowLoader.index)
+                else { popup.picked = {}; popup.pickAnchor = rowLoader.index }
+                list.currentIndex = rowLoader.index
+              }
+              onDoubleClicked: popup.paste([rowLoader.modelData.id], "normal")
+              onRightClicked: {
+                if (!popup.picked[rowLoader.modelData.id]) popup.picked = {}
+                list.currentIndex = rowLoader.index
+                const p = mapToItem(card, Theme.px(40), height)
+                popup.contextMenu(p.x, p.y)
+              }
+            }
+          }
         }
       }
 
@@ -392,6 +812,8 @@ PanelWindow {
         font.pixelSize: Theme.fontSize
         text: popup.offlineText ? popup.offlineText
             : popup.query ? "Nothing matches “" + popup.query + "”"
+            : popup.groupsRoot ? "No groups yet. F7 makes one from the selected clips, Ctrl+F7 an empty one."
+            : popup.groupId ? "This group is empty. Move clips here with the right-click menu."
             : "Nothing copied yet"
       }
     }
@@ -416,26 +838,34 @@ PanelWindow {
 
       Text {
         anchors.left: parent.left
+        anchors.right: detailText.left
+        anchors.rightMargin: Theme.px(12)
         anchors.verticalCenter: parent.verticalCenter
+        elide: Text.ElideLeft
         color: Theme.dim
         font.family: Theme.fontFamily
         font.pixelSize: Theme.fontSize - 2
         text: {
+          const where = popup.groupId ? ["Groups"].concat(popup.groupPath(popup.groupId)).join(" ▸ ")
+                      : popup.groupsRoot ? "Groups" : "History"
           const n = Object.keys(popup.picked).length
-          let s = "History · " + (popup.query ? popup.total + " found" : popup.total + " clips")
+          let s = where
+          if (!(popup.groupsRoot && !popup.query))
+            s += " · " + (popup.query ? popup.total + " found" : popup.total + (popup.total === 1 ? " clip" : " clips"))
           if (n) s += " · " + n + " selected"
           return s
         }
       }
       Text {
+        id: detailText
         anchors.right: parent.right
         anchors.verticalCenter: parent.verticalCenter
         color: Theme.dim
         font.family: Theme.fontFamily
         font.pixelSize: Theme.fontSize - 2
         text: {
-          const r = popup.currentRow
-          if (!r) return ""
+          const r = popup.currentClip
+          if (!r) return popup.currentRow ? "Enter opens · Backspace goes back" : ""
           const parts = []
           if (r.source_app) parts.push(r.source_app)
           parts.push(Format.size(r.size))

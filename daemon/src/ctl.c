@@ -19,7 +19,7 @@ int ctl_main(const char *socket_path, const char *request_json)
     cJSON_Delete(req);
     return 2;
   }
-  if (!cJSON_GetObjectItem(req, "id")) cJSON_AddNumberToObject(req, "id", 1);
+  if (!cJSON_GetObjectItem(req, "rid")) cJSON_AddNumberToObject(req, "rid", 1);
   char *line = cJSON_PrintUnformatted(req);
   cJSON_Delete(req);
 

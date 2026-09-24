@@ -8,6 +8,9 @@ Item {
 
   required property int index
   required property var modelData
+  // Position among the clips in the list (group rows come first and are not
+  // numbered), for Ditto's Ctrl+1..0 labels.
+  property int position: index
   property bool current: false
   property bool selected: false
   property bool showThumbnails: true
@@ -20,7 +23,6 @@ Item {
 
   readonly property bool isImage: modelData.kind === "image" && !!modelData.image && showThumbnails
   height: isImage ? lineHeight * 3 : lineHeight
-  width: ListView.view ? ListView.view.width : 0
 
   Rectangle {
     anchors.fill: parent
@@ -53,7 +55,7 @@ Item {
       height: row.lineHeight
       verticalAlignment: Text.AlignVCenter
       horizontalAlignment: Text.AlignRight
-      text: Format.positionLabel(row.index)
+      text: Format.positionLabel(row.position)
       color: Theme.dim
       font.family: Theme.fontFamily
       font.pixelSize: Theme.fontSize - 1

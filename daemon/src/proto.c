@@ -8,6 +8,8 @@
 #include "cJSON.h"
 #include "capture.h"
 #include "db.h"
+#include "export.h"
+#include "hotkeys.h"
 #include "hypr.h"
 #include "import.h"
 #include "ipc.h"
@@ -15,6 +17,7 @@
 #include "paste.h"
 #include "serve.h"
 #include "settings.h"
+#include "transform.h"
 #include "util.h"
 
 struct call {
@@ -211,7 +214,8 @@ static void do_paste(struct call *k, int64_t *ids, size_t n, bool keys)
   if (!mode_of(k, &mode)) return;
   struct paste_req pr = {
     .ids = ids, .n_ids = n, .mode = mode,
-    .separator = arg_str(k, "separator"), .text = arg_str(k, "text"), .send_keys = keys,
+    .separator = arg_str(k, "separator"), .text = arg_str(k, "text"),
+    .transform = arg_str(k, "transform"), .send_keys = keys,
   };
   const char *err = NULL;
   if (paste_run(k->app, &pr, &err) < 0) fail(k, "paste_failed", err);
@@ -254,8 +258,214 @@ static void op_delete(struct call *k)
     }
   }
   free(ids);
+  if (removed) hotkeys_prune(k->app->hotkeys);
   cJSON *r = cJSON_CreateObject();
   cJSON_AddNumberToObject(r, "deleted", removed);
+  ok(k, r);
+}
+
+/* ---- organising (Phase 2) -------------------------------------------- */
+
+static void emit_row(struct call *k, int64_t id)
+{
+  app_emit_clip(k->app, "clip.updated", id);
+}
+
+/* {id, title?, quick_paste?, locked?, sticky?} — only the fields present. */
+static void op_update(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  if (!db_exists(k->app->db, id)) { fail(k, "not_found", "no such clip"); return; }
+  const char *err = NULL;
+  const cJSON *v;
+  if ((v = arg(k, "title")) && (cJSON_IsString(v) || cJSON_IsNull(v)))
+    if (db_clip_set_title(k->app->db, id, cJSON_GetStringValue(v), &err) < 0) goto failed;
+  if ((v = arg(k, "quick_paste")) && (cJSON_IsString(v) || cJSON_IsNull(v)))
+    if (db_clip_set_quick_paste(k->app->db, id, cJSON_GetStringValue(v), &err) < 0) goto failed;
+  if ((v = arg(k, "locked")) && cJSON_IsBool(v))
+    if (db_clip_set_locked(k->app->db, id, cJSON_IsTrue(v), &err) < 0) goto failed;
+  if ((v = arg(k, "sticky"))) {
+    enum sticky_where w;
+    if (cJSON_IsFalse(v) || cJSON_IsNull(v)) w = STICKY_OFF;
+    else if (cJSON_IsTrue(v) || (cJSON_IsString(v) && !strcmp(v->valuestring, "top"))) w = STICKY_TOP;
+    else if (cJSON_IsString(v) && !strcmp(v->valuestring, "bottom")) w = STICKY_BOTTOM;
+    else { fail(k, "bad_request", "'sticky' is \"top\", \"bottom\" or false"); return; }
+    if (db_clip_set_sticky(k->app->db, id, w, &err) < 0) goto failed;
+  }
+  emit_row(k, id);
+  ok(k, db_row(k->app->db, id));
+  return;
+failed:
+  emit_row(k, id);
+  fail(k, "bad_value", err);
+}
+
+static void op_set_text(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  if (db_clip_set_text(k->app->db, id, arg_str(k, "text"), &err) < 0) { fail(k, "bad_value", err); return; }
+  emit_row(k, id);
+  ok(k, db_row(k->app->db, id));
+}
+
+static void op_move(struct call *k)
+{
+  int64_t *ids;
+  size_t n = arg_ids(k, &ids);
+  if (!n) return;
+  int64_t group;
+  if (!arg_int(k, "group", 0, &group)) { free(ids); return; }
+  const char *err = NULL;
+  size_t moved = 0;
+  for (size_t i = 0; i < n; i++) {
+    if (db_clip_move(k->app->db, ids[i], group, &err) == 0) {
+      moved++;
+      emit_row(k, ids[i]);
+    }
+  }
+  free(ids);
+  if (!moved && err) { fail(k, "bad_value", err); return; }
+  app_emit(k->app, "groups.changed", NULL);
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "moved", (double)moved);
+  ok(k, r);
+}
+
+static void op_reorder_sticky(struct call *k)
+{
+  int64_t *ids;
+  size_t n = arg_ids(k, &ids);
+  if (!n) return;
+  const char *err = NULL;
+  int rc = db_clip_reorder_sticky(k->app->db, ids, n, &err);
+  free(ids);
+  if (rc < 0) { fail(k, "db_error", err); return; }
+  app_emit(k->app, "clips.reset", NULL);
+  ok(k, NULL);
+}
+
+static void op_groups_list(struct call *k)
+{
+  ok(k, db_groups_list(k->app->db));
+}
+
+static void op_groups_create(struct call *k)
+{
+  int64_t parent;
+  if (!arg_int(k, "parent", 0, &parent)) return;
+  const char *err = NULL;
+  int64_t id = db_group_create(k->app->db, arg_str(k, "name"), parent, &err);
+  if (id < 0) { fail(k, "bad_value", err); return; }
+  app_emit(k->app, "groups.changed", NULL);
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "id", (double)id);
+  ok(k, r);
+}
+
+static void op_groups_rename(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  if (db_group_rename(k->app->db, id, arg_str(k, "name"), &err) < 0) { fail(k, "bad_value", err); return; }
+  app_emit(k->app, "groups.changed", NULL);
+  ok(k, NULL);
+}
+
+static void op_groups_move(struct call *k)
+{
+  int64_t id, parent;
+  if (!arg_int(k, "id", 0, &id) || !arg_int(k, "parent", 0, &parent)) return;
+  const char *err = NULL;
+  if (db_group_move(k->app->db, id, parent, &err) < 0) { fail(k, "bad_value", err); return; }
+  app_emit(k->app, "groups.changed", NULL);
+  ok(k, NULL);
+}
+
+static void op_groups_delete(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  bool cascade = cJSON_IsTrue(arg(k, "cascade"));
+  const char *err = NULL;
+  int64_t *affected = NULL;
+  size_t n = 0;
+  if (db_group_delete(k->app->db, id, cascade, &affected, &n, &err) < 0) { fail(k, "bad_value", err); return; }
+  free(affected);
+  if (cascade) hotkeys_prune(k->app->hotkeys);
+  app_emit(k->app, "groups.changed", NULL);
+  app_emit(k->app, "clips.reset", NULL);
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, cascade ? "deleted_clips" : "released_clips", (double)n);
+  ok(k, r);
+}
+
+static void op_hotkeys_list(struct call *k)
+{
+  ok(k, hotkeys_list(k->app->hotkeys));
+}
+
+static void op_hotkeys_set(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  char *err_buf = NULL;
+  const char *action = arg_str(k, "action");
+  const char *hk_arg = arg_str(k, "arg");
+  int64_t hid = hotkeys_set(k->app->hotkeys, id, arg_str(k, "accel"), action, hk_arg, &err, &err_buf);
+  if (hid < 0) {
+    fail(k, "bad_value", err);
+    free(err_buf);
+    return;
+  }
+  app_emit(k->app, "hotkeys.changed", NULL);
+  if (action && !strcmp(action, "paste_clip") && hk_arg) {
+    int64_t clip = db_clip_id_by_uuid(k->app->db, hk_arg);
+    if (clip) emit_row(k, clip);
+  }
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "id", (double)hid);
+  ok(k, r);
+}
+
+static void op_hotkeys_remove(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  if (hotkeys_remove(k->app->hotkeys, id, &err) < 0) { fail(k, "not_found", err); return; }
+  app_emit(k->app, "hotkeys.changed", NULL);
+  app_emit(k->app, "clips.reset", NULL);
+  ok(k, NULL);
+}
+
+static void op_transforms(struct call *k)
+{
+  size_t n;
+  const struct transform_def *defs = transform_list(&n);
+  cJSON *arr = cJSON_CreateArray();
+  for (size_t i = 0; i < n; i++) {
+    cJSON *t = cJSON_CreateObject();
+    cJSON_AddStringToObject(t, "id", defs[i].id);
+    cJSON_AddStringToObject(t, "label", defs[i].label);
+    cJSON_AddItemToArray(arr, t);
+  }
+  ok(k, arr);
+}
+
+static void op_export(struct call *k)
+{
+  const char *path = arg_str(k, "path");
+  if (!path || path[0] != '/') { fail(k, "bad_request", "'path' must be an absolute file path"); return; }
+  int64_t group;
+  if (!arg_int(k, "group", 0, &group)) return;
+  const char *err = NULL;
+  cJSON *r = export_json(k->app->db, path, group, &err);
+  if (!r) { fail(k, "export_failed", err); return; }
   ok(k, r);
 }
 
@@ -330,8 +540,18 @@ static void op_settings_set(struct call *k)
 static void op_import(struct call *k)
 {
   const char *fmt = arg_str(k, "format");
-  if (!fmt || strcmp(fmt, "omarchy")) { fail(k, "bad_request", "'format' must be \"omarchy\""); return; }
   const char *path = arg_str(k, "path");
+  if (fmt && !strcmp(fmt, "clipnet-json")) {
+    if (!path || path[0] != '/') { fail(k, "bad_request", "'path' must be an absolute file path"); return; }
+    const char *err = NULL;
+    cJSON *r = import_json(k->app->db, path, &err);
+    if (!r) { fail(k, "import_failed", err); return; }
+    app_emit(k->app, "groups.changed", NULL);
+    app_emit(k->app, "clips.reset", NULL);
+    ok(k, r);
+    return;
+  }
+  if (!fmt || strcmp(fmt, "omarchy")) { fail(k, "bad_request", "'format' is \"omarchy\" or \"clipnet-json\""); return; }
   char *def = xdg_path("XDG_STATE_HOME", ".local/state", "omarchy/clipboard-history.json");
   const char *err = NULL;
   cJSON *r = import_omarchy(k->app->db, path ? path : def, &err);
@@ -345,7 +565,10 @@ static void op_retention(struct call *k)
 {
   int n = db_retention(k->app->db, now_ms());
   if (n < 0) { fail(k, "db_error", "retention failed"); return; }
-  if (n > 0) app_emit(k->app, "clips.reset", NULL);
+  if (n > 0) {
+    hotkeys_prune(k->app->hotkeys);
+    app_emit(k->app, "clips.reset", NULL);
+  }
   cJSON *r = cJSON_CreateObject();
   cJSON_AddNumberToObject(r, "removed", n);
   ok(k, r);
@@ -381,11 +604,25 @@ static const struct {
   { "settings.set", op_settings_set },
   { "import", op_import },
   { "retention.run", op_retention },
+  { "update", op_update },
+  { "set_text", op_set_text },
+  { "move", op_move },
+  { "reorder_sticky", op_reorder_sticky },
+  { "groups.list", op_groups_list },
+  { "groups.create", op_groups_create },
+  { "groups.rename", op_groups_rename },
+  { "groups.move", op_groups_move },
+  { "groups.delete", op_groups_delete },
+  { "hotkeys.list", op_hotkeys_list },
+  { "hotkeys.set", op_hotkeys_set },
+  { "hotkeys.remove", op_hotkeys_remove },
+  { "transforms.list", op_transforms },
+  { "export", op_export },
 };
 
 void proto_handle(struct app *app, struct ipc_client *c, const cJSON *req)
 {
-  struct call k = { app, c, req, cJSON_GetObjectItemCaseSensitive(req, "id") };
+  struct call k = { app, c, req, cJSON_GetObjectItemCaseSensitive(req, "rid") };
   const char *op = arg_str(&k, "op");
   if (!op) { fail(&k, "bad_request", "missing 'op'"); return; }
   for (size_t i = 0; i < ARRAY_LEN(ops); i++) {

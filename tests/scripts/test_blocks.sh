@@ -23,6 +23,9 @@ block='o.bind("CTRL + apostrophe", "Clipboard history", hl.dsp.global("clipnet:t
 -- a line with a backslash \n and a $dollar'
 for f in "${samples[@]}"; do
   name=$(basename "$f")
+  # Once installed, the real files already hold our block: start the round
+  # trip from the file as it would be without it.
+  remove_block "$f"
   cp "$f" "$f.orig"
   write_block "$f" "$block"
   check "$name: block written" grep -qxF -e "$BEGIN_MARK" "$f"

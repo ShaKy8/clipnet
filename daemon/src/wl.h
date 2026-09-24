@@ -36,6 +36,16 @@ void wl_set_selection(struct wl *wl, struct ext_data_control_source_v1 *s);
 void wl_source_destroy(struct ext_data_control_source_v1 *s);
 void wl_flush(struct wl *wl);
 
+/* Hyprland global shortcuts: the compositor calls us when a bind that
+ * dispatches hl.dsp.global("<app_id>:<id>") is pressed. Registering an
+ * app_id + id twice on one connection is a fatal protocol error, so callers
+ * register each id once and keep it. NULL when the protocol is missing. */
+struct wl_shortcut;
+typedef void (*wl_shortcut_cb)(void *ctx, const char *id);
+struct wl_shortcut *wl_shortcut_register(struct wl *wl, const char *app_id, const char *id, const char *description,
+                                         wl_shortcut_cb cb, void *ctx);
+bool wl_has_shortcuts(struct wl *wl);
+
 /* Ask the compositor whether anything is on the clipboard right now. The
  * main device is not told when a clipboard owner exits (Hyprland 0.56 sends
  * no selection(NULL) then), but a newly created device always receives the

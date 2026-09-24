@@ -4,6 +4,7 @@ import Quickshell.Hyprland
 import Quickshell.Io
 import qs.common
 import "components"
+import "settings"
 
 // CLIP//NET — Ditto's clipboard history for Omarchy.
 //
@@ -18,7 +19,17 @@ import "components"
 ShellRoot {
   id: shell
 
-  Popup { id: popup }
+  Popup {
+    id: popup
+    onSettingsRequested: settingsLoader.open()
+  }
+
+  // Built on first use: most sessions never open it.
+  LazyLoader {
+    id: settingsLoader
+    function open() { active = true; item.openPage() }
+    SettingsWindow {}
+  }
 
   GlobalShortcut {
     appid: "clipnet"; name: "toggle"
@@ -37,5 +48,6 @@ ShellRoot {
     function show(): void { if (!popup.open) popup.show() }
     function hide(): void { popup.hide() }
     function reloadTheme(): void { Theme.reload() }
+    function settings(): void { settingsLoader.open() }
   }
 }

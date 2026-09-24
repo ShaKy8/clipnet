@@ -60,5 +60,8 @@ char *latin1_to_utf8(const uint8_t *s, size_t n, size_t *out_len);
 size_t utf8_prefix(const char *s, size_t n, size_t max_chars);
 
 void hex_encode(const uint8_t *in, size_t n, char *out /* 2n+1 */);
+/* Standard base64 with padding. Decode ignores whitespace; NULL on bad input. */
+char *base64_encode(const uint8_t *in, size_t n);
+uint8_t *base64_decode(const char *in, size_t *out_len);
 void uuid_v4(char out[37]);
 int set_nonblock(int fd);

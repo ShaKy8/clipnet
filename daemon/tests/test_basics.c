@@ -103,8 +103,37 @@ static void test_imgmeta(void)
   CHECK(!img_meta_parse((const uint8_t *)"hello", 5, &m));
 }
 
+static void test_base64(void)
+{
+  static const char *plain[] = { "", "f", "fo", "foo", "foob", "fooba", "foobar" };
+  static const char *enc[] = { "", "Zg==", "Zm8=", "Zm9v", "Zm9vYg==", "Zm9vYmE=", "Zm9vYmFy" };
+  for (size_t i = 0; i < 7; i++) {
+    char *e = base64_encode((const uint8_t *)plain[i], strlen(plain[i]));
+    CHECK_STR(e, enc[i]);
+    size_t n;
+    uint8_t *d = base64_decode(e, &n);
+    CHECK(d && n == strlen(plain[i]) && !memcmp(d, plain[i], n));
+    free(d);
+    free(e);
+  }
+  uint8_t all[256];
+  for (int i = 0; i < 256; i++) all[i] = (uint8_t)i;
+  char *e = base64_encode(all, 256);
+  size_t n;
+  uint8_t *d = base64_decode(e, &n);
+  CHECK(d && n == 256 && !memcmp(d, all, 256));
+  free(d);
+  free(e);
+  CHECK(base64_decode("Zm9v!", &n) == NULL);
+  CHECK(base64_decode("Zg==Zg", &n) == NULL);
+  d = base64_decode("Zm9v\nYmFy", &n);
+  CHECK(d && n == 6 && !memcmp(d, "foobar", 6));
+  free(d);
+}
+
 void run_tests(void)
 {
+  test_base64();
   test_sha256();
   test_utf8();
   test_uuid();

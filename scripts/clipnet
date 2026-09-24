@@ -5,6 +5,7 @@
 #   clipnet                     start (daemon + UI; no-op if running)
 #   clipnet start|stop|restart|status|restart-ui
 #   clipnet toggle|show|hide    the popup (Ctrl+' does the same)
+#   clipnet settings            the settings window
 #   clipnet paste N | copy N    paste / copy history position N (1 = newest)
 #   clipnet list [-n N] [TEXT]  recent clips, or those matching TEXT
 #   clipnet pause [MINUTES] | resume
@@ -288,7 +289,7 @@ case "${1:-start}" in
     if daemon_running; then echo "daemon: running"; ctl '{"op":"state.get"}'; else echo "daemon: stopped"; fi
     if ui_running; then echo "ui: running"; else echo "ui: stopped"; fi
     ;;
-  toggle|show|hide) quickshell ipc -p "$ROOT" call clipnet "$1" ;;
+  toggle|show|hide|settings) quickshell ipc -p "$ROOT" call clipnet "$1" ;;
   paste|copy)
     [[ ${2:-} =~ ^[0-9]+$ ]] || die "usage: clipnet $1 N"
     ctl "{\"op\":\"${1}_position\",\"n\":$2}" >/dev/null

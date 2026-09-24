@@ -101,6 +101,13 @@ ctl "{\"op\":\"copy\",\"ids\":[$id],\"mode\":\"plain\"}" >/dev/null
 sleep 0.1
 check "plain mode drops html" bash -c '! wl-paste -l | grep -qx text/html'
 
+echo "live: Special Paste transforms the text it serves"
+ctl "{\"op\":\"copy\",\"ids\":[$id],\"transform\":\"upper\"}" >/dev/null
+sleep 0.1
+check "transformed text is served" test "$(wl-paste -n)" = "CLIPNET LIVE TEST — ✓ ÜNÏCÖDÉ"
+check "transformed paste offers no html" bash -c '! wl-paste -l | grep -qx text/html'
+check "a transform is not stored as a new clip" wait_count 2
+
 echo "live: image"
 img="$ROOT/tests/integration/fixture.png"
 wlcopy -t image/png < "$img"

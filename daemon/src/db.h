@@ -87,10 +87,37 @@ cJSON *db_row(struct db *db, int64_t id);
 bool db_exists(struct db *db, int64_t id);
 /* 0 when found. */
 int db_clip_uuid(struct db *db, int64_t id, char out[37]);
+/* 0 when absent. */
+int64_t db_clip_id_by_uuid(struct db *db, const char *uuid);
 
 int db_delete(struct db *db, int64_t id);
 /* Move to the top of history; count a paste when pasted is true. */
 int db_touch(struct db *db, int64_t id, bool pasted);
+
+/* ---- editing (db_edit.c); 0 on success, -1 with *err set ---------------- */
+
+enum sticky_where { STICKY_OFF, STICKY_TOP, STICKY_BOTTOM };
+
+int db_clip_set_title(struct db *db, int64_t id, const char *title, const char **err);
+int db_clip_set_quick_paste(struct db *db, int64_t id, const char *word, const char **err);
+int db_clip_set_locked(struct db *db, int64_t id, bool locked, const char **err);
+int db_clip_set_sticky(struct db *db, int64_t id, enum sticky_where where, const char **err);
+/* ids: sticky clips in their new order. */
+int db_clip_reorder_sticky(struct db *db, const int64_t *ids, size_t n, const char **err);
+/* group_id 0: back to plain history. */
+int db_clip_move(struct db *db, int64_t id, int64_t group_id, const char **err);
+int db_clip_set_text(struct db *db, int64_t id, const char *text, const char **err);
+
+bool db_group_exists(struct db *db, int64_t id);
+/* Returns the new id, or -1. */
+int64_t db_group_create(struct db *db, const char *name, int64_t parent_id, const char **err);
+int db_group_rename(struct db *db, int64_t id, const char *name, const char **err);
+int db_group_move(struct db *db, int64_t id, int64_t parent_id, const char **err);
+/* cascade: delete the clips too; otherwise they return to plain history.
+ * *affected lists the clip ids either way (caller frees). */
+int db_group_delete(struct db *db, int64_t id, bool cascade, int64_t **affected, size_t *n_affected, const char **err);
+/* Every group, flat: [{id, uuid, parent_id, name, count}] in display order. */
+cJSON *db_groups_list(struct db *db);
 
 /* Raw JSON text of a setting, NULL when unset. Caller frees. */
 char *db_setting_raw(struct db *db, const char *key);

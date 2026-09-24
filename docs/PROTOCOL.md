@@ -11,15 +11,16 @@ it fails with an error code instead of changing shape.
 ## Framing
 
 ```
-→ {"id": 7, "op": "list", "query": "curl", "limit": 50}
-← {"id": 7, "ok": true, "result": {"rows": [...], "total": 3}}
-← {"id": 8, "ok": false, "error": {"code": "not_found", "message": "no such clip"}}
+→ {"rid": 7, "op": "list", "query": "curl", "limit": 50}
+← {"rid": 7, "ok": true, "result": {"rows": [...], "total": 3}}
+← {"rid": 8, "ok": false, "error": {"code": "not_found", "message": "no such clip"}}
 ← {"event": "clip.added", "data": {...row...}}
 ```
 
-- Every request gets exactly one reply, in request order. `id` is echoed back
-  as given; it may be any JSON value.
-- Events arrive only after `hello` with `"subscribe": true`, and never carry an `id`.
+- Every request gets exactly one reply, in request order. `rid` (request id)
+  is echoed back as given; it may be any JSON value. It is not `id` because
+  operations use `id` for the clip or group they act on.
+- Events arrive only after `hello` with `"subscribe": true`, and never carry a `rid`.
 - There is no binary data on the socket. Image and large payloads are referred
   to by absolute file path (`image`, `formats[].path`).
 - Lines are limited to 16 MiB. A client that stops reading is dropped once
@@ -42,7 +43,7 @@ Returned by `list`, `get`, and the `clip.added` / `clip.updated` events:
 | `created_at`, `last_used_at` | Unix ms UTC |
 | `paste_count`, `size` | |
 | `source_app`, `source_title` | focused app when copied (title only if `store_source_title`) |
-| `sticky`, `locked`, `group_id`, `quick_paste`, `hotkey` | organisation (Phase 2) |
+| `sticky`, `locked`, `group_id`, `quick_paste`, `hotkey` | organisation; `hotkey` is its accelerator or null |
 | `mimes` | stored formats, in offer order |
 | `image` | path of the image payload, or null |
 | `flags` | bit 1: the source offered its HTML markup as "plain text" |
@@ -70,21 +71,41 @@ Returned by `list`, `get`, and the `clip.added` / `clip.updated` events:
 | `resume` | | null |
 | `settings.get` | | every setting with its value |
 | `settings.set` | `key`, `value` | null (`bad_value` on a wrong type or range) |
-| `import` | `format: "omarchy"`, `path` | `{added, duplicates, skipped}` |
+| `import` | `format`: `"omarchy"` (`path` optional) or `"clipnet-json"` (`path` required) | `{added, duplicates, skipped}` |
 | `retention.run` | | `{removed}` |
+| `update` | `id`, any of `title`, `quick_paste` (null clears), `locked`, `sticky` (`"top"`, `"bottom"`, false) | the row |
+| `set_text` | `id`, `text` | the row. The content becomes this text only: other formats are dropped |
+| `move` | `ids`, `group` (0 = back to plain history) | `{moved}` |
+| `reorder_sticky` | `ids`: the sticky clips in their new order | null |
+| `groups.list` | | `[{id, uuid, parent_id, name, count}]`, flat, in display order |
+| `groups.create` | `name`, `parent` | `{id}` |
+| `groups.rename` | `id`, `name` | null |
+| `groups.move` | `id`, `parent` | null (a group cannot go inside itself) |
+| `groups.delete` | `id`, `cascade` | `{released_clips}` or `{deleted_clips}`; subgroups go too |
+| `hotkeys.list` | | `[{id, accel, action, arg, enabled, label, conflict}]` |
+| `hotkeys.set` | `id` (0 = new), `accel` (`"Ctrl+Alt+1"`), `action` (`paste_clip` + uuid, or `paste_position` + `"N"`) | `{id}`; `bad_value` names the bind already on those keys |
+| `hotkeys.remove` | `id` | null |
+| `transforms.list` | | `[{id, label}]`: the Special Paste transforms |
+| `export` | `path` (absolute), `group` (0 = all) | `{clips, groups, path}` |
 
 When `paste` or `copy` gets several ids, the clips' text is joined with
 `separator` (default: the `multi_separator` setting) and pasted as a single
-text clip. `text` overrides the content, for Special Paste transforms, while
-still crediting the ids.
+text clip. `transform` (an id from `transforms.list`) applies Special Paste to
+that text first; `text` replaces the content outright. Both still credit the
+ids (move to top, paste count). Neither stores a new clip.
+
+Hotkeys are stored in the portable spelling (`Ctrl+Alt+1`, `Super+Apostrophe`)
+and bound in Hyprland as global shortcuts `clipnetd:h<id>`. Bind descriptions
+never include clip text, only a title the user set or the clip's number.
 
 ## Events
 
-`clip.added`, `clip.updated` (a row), `clip.deleted` (`{id}`), `clips.reset`
+`clip.added`, `clip.updated` (a row), `clip.deleted` (`{id}`), `groups.changed`,
+`hotkeys.changed`, `clips.reset`
 (reload everything: after an import or retention), `state.changed`
 (`{paused, paused_until}`), `settings.changed` (`{key, value}`).
 
 ## Error codes
 
 `bad_request`, `unknown_op`, `not_found`, `bad_value`, `paste_failed`,
-`db_error`, `import_failed`, `too_large`.
+`db_error`, `import_failed`, `export_failed`, `too_large`.

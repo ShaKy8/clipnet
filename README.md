@@ -11,22 +11,35 @@ scripts/clipnet uninstall    undo all of that (history kept; --purge deletes it)
 scripts/clipnet              start (no-op if running)      stop | restart | status
 scripts/clipnet list [TEXT]  recent clips / search         paste N | copy N
 scripts/clipnet pause [MIN]  stop recording (for MIN minutes); resume
-scripts/clipnet set KEY VAL  change a setting (see `clipnet settings`)
+scripts/clipnet settings     the settings window         (or set KEY VAL from a terminal)
 ```
 
 ## In the popup
 
 | Key | | Key | |
 |---|---|---|---|
-| type | search (substring, every word must match) | Enter / double-click | paste |
-| Shift+Enter | paste as plain text | Ctrl+1 … Ctrl+0 | paste row 1–10 |
-| ↑ ↓ PgUp PgDn, Ctrl+Home/End | move | Shift+↑↓, Ctrl/Shift+click, Ctrl+A | select several, then Enter pastes them joined |
-| F3 | view the whole clip (Alt+W wraps; Shift+PgUp/PgDn scrolls) | Delete | delete the clip(s) |
-| Ctrl+C | copy to the clipboard without pasting | Alt+C | clear the search |
-| Esc | clear the search, then close | Ctrl+' | close |
+| type | search (substring, every word must match) | Enter / double-click | paste (on a group: open it) |
+| Shift+Enter | paste as plain text | Ctrl+1 … Ctrl+0 | paste clip 1–10 |
+| Ctrl+Shift+V | Special Paste: case, trim, one line, camelCase, slug, date… | Menu / Shift+F10 / right-click | everything else |
+| ↑ ↓ PgUp PgDn, Ctrl+Home/End | move | Shift+↑↓, Ctrl/Shift+click, Ctrl+A | select several; Enter pastes them joined |
+| F3 | view the whole clip (Alt+W wraps; Shift+PgUp/PgDn scrolls) | Delete | delete the clip(s), or the group |
+| Ctrl+E / Ctrl+N | edit the clip / write a new one | Alt+Enter | properties: description, group, hotkey, quick-paste word |
+| Ctrl+S / Ctrl+L | sticky (pin to top) / never auto-delete | Alt+↑↓ | reorder sticky clips |
+| Ctrl+G | Groups ↔ History | Backspace (empty search) | up one level |
+| F7 / Ctrl+F7 | new group from the selection / empty group | F2 | rename the group |
+| Ctrl+C | copy without pasting | Alt+C | clear the search |
+| Ctrl+, | settings | Esc | clear the search, then close |
 
-Ctrl+1–0, Shift+Enter, F3, Alt+C and Ctrl+C are Ditto's own defaults (from
-its `ActionEnums.cpp`). The rest follow the usual list conventions.
+These are Ditto's own defaults, taken from its `ActionEnums.cpp`: Enter,
+Shift+Enter, Ctrl+1–0, F3, Ctrl+G, F7/Ctrl+F7, Ctrl+N, Ctrl+E, Alt+Enter, Alt+C,
+Ctrl+C and Delete. The rest are CLIP//NET's own.
+
+A **quick-paste word** (set in Properties) works like Ditto's: type the word,
+its clip jumps to the top, and Enter pastes it. A clip's **hotkey** pastes it
+from anywhere without opening the popup. The Settings window (Hotkeys page)
+can also bind history positions, e.g. Ctrl+Alt+1 for "the newest clip".
+Hotkeys that clash with an existing Hyprland binding are refused, and the
+message says what already owns them.
 
 ## How it works
 
@@ -77,14 +90,15 @@ Hyprland ── Ctrl+' → hl.dsp.global("clipnet:toggle") ──► quickshell 
 ## Development
 
 ```
-make test        unit tests (C) and config-block tests
+make test        unit (C), config-block and IPC tests; no session needed
 make test-live   captures and serves through the real clipboard on a throwaway
                  database; saves and restores your clipboard
 make asan        unit tests under AddressSanitizer + UBSan
 CLIPNETD=/path/to/asan/clipnetd tests/integration/live_test.sh
 ```
 
-`docs/PROTOCOL.md` is the socket API. The schema lives in
+`docs/PROTOCOL.md` is the socket API, and exports are self-describing JSON
+(`"format": "clipnet-export"`), with every format of every clip base64-encoded. The schema lives in
 `daemon/src/schema.c` and uses only portable types: ms timestamps, MIME
 names, uuids.
 

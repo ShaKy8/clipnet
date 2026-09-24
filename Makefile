@@ -1,7 +1,7 @@
 # CLIP//NET. The daemon is the only thing that needs building; the UI is QML.
 #
 #   make            build daemon/clipnetd
-#   make test       unit tests + config-block tests
+#   make test       unit, config-block and IPC tests (no session needed)
 #   make test-live  round trip through the real clipboard (needs a session)
 #   make asan       unit tests under AddressSanitizer + UBSan
 
@@ -9,8 +9,9 @@ all:
 	$(MAKE) -C daemon
 
 test:
-	$(MAKE) -C daemon test
+	$(MAKE) -C daemon test clipnetd
 	tests/scripts/test_blocks.sh
+	tests/integration/ipc_test.py
 
 test-live:
 	$(MAKE) -C daemon test-live

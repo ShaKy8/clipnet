@@ -227,6 +227,56 @@ void hex_encode(const uint8_t *in, size_t n, char *out)
   out[2 * n] = 0;
 }
 
+static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+char *base64_encode(const uint8_t *in, size_t n)
+{
+  char *out = xmalloc(4 * ((n + 2) / 3) + 1);
+  size_t o = 0, i = 0;
+  for (; i + 2 < n; i += 3) {
+    uint32_t v = (uint32_t)in[i] << 16 | (uint32_t)in[i + 1] << 8 | in[i + 2];
+    out[o++] = b64[v >> 18];
+    out[o++] = b64[(v >> 12) & 63];
+    out[o++] = b64[(v >> 6) & 63];
+    out[o++] = b64[v & 63];
+  }
+  if (i < n) {
+    uint32_t v = (uint32_t)in[i] << 16 | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0);
+    out[o++] = b64[v >> 18];
+    out[o++] = b64[(v >> 12) & 63];
+    out[o++] = i + 1 < n ? b64[(v >> 6) & 63] : '=';
+    out[o++] = '=';
+  }
+  out[o] = 0;
+  return out;
+}
+
+uint8_t *base64_decode(const char *in, size_t *out_len)
+{
+  size_t n = strlen(in);
+  uint8_t *out = xmalloc(n / 4 * 3 + 3);
+  size_t o = 0;
+  uint32_t acc = 0;
+  int bits = 0, pad = 0;
+  for (size_t i = 0; i < n; i++) {
+    char c = in[i];
+    if (c == ' ' || c == '\n' || c == '\r' || c == '\t') continue;
+    if (c == '=') { pad++; continue; }
+    if (pad) { free(out); return NULL; } /* data after padding */
+    const char *p = strchr(b64, c);
+    if (!p || !c) { free(out); return NULL; }
+    acc = acc << 6 | (uint32_t)(p - b64);
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      out[o++] = (uint8_t)(acc >> bits);
+    }
+  }
+  if (pad > 2 || bits >= 6) { free(out); return NULL; }
+  *out_len = o;
+  return out;
+}
+
 void uuid_v4(char out[37])
 {
   uint8_t b[16];
