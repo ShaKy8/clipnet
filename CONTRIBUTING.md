@@ -114,6 +114,8 @@ with a test in `tests/qml/`.
 - Update the docs your change touches: `README.md` for keys and features,
   `docs/SCRIPTING.md` for script API changes, `docs/PROTOCOL.md` and
   `docs/SCHEMA.md` as above.
+- Add a line under **Unreleased** in `CHANGELOG.md` for anything a user would
+  notice.
 - Commit messages: a short summary line, a blank line, then what changed and
   why.
 

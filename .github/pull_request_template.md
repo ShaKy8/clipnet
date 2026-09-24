@@ -15,4 +15,5 @@
 - [ ] `make test-live` passes, if this touches capture, serving, pasting or keep-alive
 - [ ] Clip contents never reach a log
 - [ ] Docs updated where needed: `README.md` (keys, features), `docs/PROTOCOL.md` (operations, events), `docs/SCHEMA.md` (migrations, which are append-only), `docs/SCRIPTING.md` (script API)
+- [ ] A line under **Unreleased** in `CHANGELOG.md`, if users would notice the change
 - [ ] Screenshots, if any, use demo data (`tools/readme-screenshot.sh`), never a real history
