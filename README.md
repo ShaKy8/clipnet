@@ -152,7 +152,9 @@ CLIPNETD=/path/to/asan/clipnetd tests/integration/live_test.sh
 
 GitHub Actions runs `make test` and `make asan` on every push, plus the live
 clipboard test against a headless Sway (everything except the
-Hyprland-specific checks), in an Arch Linux container.
+Hyprland-specific checks), in an Arch Linux container. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for bug reports, conventions and pull
+requests.
 
 `docs/PROTOCOL.md` is the socket API, `docs/SCHEMA.md` is the database
 contract (including what a macOS port maps differently), and exports are self-describing JSON
