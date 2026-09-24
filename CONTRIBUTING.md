@@ -27,6 +27,7 @@ another user or process reach the daemon): don't describe them in a public
 issue. Report them privately with GitHub's
 [Report a vulnerability](https://github.com/ShaKy8/clipnet/security/advisories/new)
 form, on the repository's **Security** tab. Only the maintainers see the report.
+[SECURITY.md](SECURITY.md) has the details and what's in scope.
 
 ## Building and testing
 
