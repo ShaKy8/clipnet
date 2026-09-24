@@ -14,7 +14,8 @@ import Quickshell.Io
 Singleton {
   id: root
 
-  readonly property string path: Quickshell.env("XDG_RUNTIME_DIR") + "/clipnet/clipnetd.sock"
+  // CLIPNET_SOCKET points the UI at another daemon (development, demos).
+  readonly property string path: Quickshell.env("CLIPNET_SOCKET") || (Quickshell.env("XDG_RUNTIME_DIR") + "/clipnet/clipnetd.sock")
   readonly property bool online: !!sock && sock.connected && ready
   property bool ready: false
   property bool paused: false

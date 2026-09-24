@@ -4,6 +4,11 @@
 with all of its formats, and **Ctrl+'** brings the history up at the mouse
 cursor. Type to search, then press Enter to paste into the window you came from.
 
+![The CLIP//NET popup: numbered clips with image thumbnails, a sticky signature with its quick-paste word, and the full view (F3) of a rich-text clip](docs/screenshot.png)
+
+*The popup in Omarchy's Ethereal theme, with F3's full view open. The clips
+are demo data.*
+
 ```
 scripts/clipnet install      daemon as a user service, Ctrl+' and Super+Ctrl+V,
                              replaces Omarchy's clipboard manager, imports its history
@@ -139,6 +144,7 @@ make test-live   captures and serves through the real clipboard on a throwaway
                  own clipnetd meanwhile so test copies never reach your history
 make asan        unit tests under AddressSanitizer + UBSan
 make -C daemon bench   timings with 50,000 synthetic clips (N=… to change)
+tools/readme-screenshot.sh   retake docs/screenshot.png from invented demo clips
 CLIPNETD=/path/to/asan/clipnetd tests/integration/live_test.sh
 ```
 
