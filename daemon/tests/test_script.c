@@ -295,7 +295,7 @@ static void test_examples(void)
   on_copy("git clone https://github.com/sabrogden/Ditto", &v);
   CHECK_STR(v.group, "Code/Git");
   copy_verdict_free(&v);
-  on_copy("git@github.com:ShaKy8/omarchy-config.git", &v);
+  on_copy("git@github.com:example/project.git", &v);
   CHECK_STR(v.group, "Code/Git");
   copy_verdict_free(&v);
   on_copy("https://github.com/sabrogden/Ditto", &v);
