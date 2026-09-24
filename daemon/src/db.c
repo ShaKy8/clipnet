@@ -412,6 +412,8 @@ struct where {
   struct buf sql;
   char *params[64];
   size_t n;
+  bool group_scoped; /* filters on group_id: the group-order index applies */
+  int like_terms;    /* short terms filtered with LIKE */
 };
 
 static void where_param(struct where *w, char *owned)
@@ -426,24 +428,13 @@ static void where_free(struct where *w)
   buf_free(&w->sql);
 }
 
-static void build_where(struct db *db, const struct list_query *q, struct where *w)
+/* Split a query into terms. Terms of three or more characters go through
+ * the trigram index (as one FTS5 expression, returned here); shorter ones
+ * cannot (a trigram needs three) and become LIKE filters on w. */
+static char *split_terms(const char *query, struct where *w)
 {
-  buf_append_str(&w->sql, " WHERE 1");
-  if (!q->all_groups) {
-    if (q->group_id) {
-      char *id = xasprintf("%lld", (long long)q->group_id);
-      buf_append_str(&w->sql, " AND c.group_id = CAST(? AS INTEGER)");
-      where_param(w, id);
-    } else if (!setting_bool(db, "show_grouped_in_history")) {
-      buf_append_str(&w->sql, " AND c.group_id IS NULL");
-    }
-  }
-  if (!q->query || !q->query[0]) return;
-
-  /* Terms are ANDed. Three or more characters go through the trigram index;
-   * shorter ones cannot (a trigram needs three) and fall back to LIKE. */
   struct buf match = { 0 };
-  const char *s = q->query;
+  const char *s = query;
   while (*s) {
     while (*s == ' ' || *s == '\t' || *s == '\n') s++;
     const char *e = s;
@@ -461,7 +452,7 @@ static void build_where(struct db *db, const struct list_query *q, struct where 
         else buf_append(&match, s + i, 1);
       }
       buf_append(&match, "\"", 1);
-    } else {
+    } else if (w) {
       struct buf pat = { 0 };
       buf_append(&pat, "%", 1);
       for (size_t i = 0; i < len; i++) {
@@ -475,16 +466,35 @@ static void build_where(struct db *db, const struct list_query *q, struct where 
       where_param(w, xstrdup(p));
       where_param(w, xstrdup(p));
       where_param(w, p);
+      w->like_terms++;
     }
     s = e;
   }
-  if (match.len) {
-    buf_append_str(&w->sql, " AND (c.id IN (SELECT rowid FROM clips_fts WHERE clips_fts MATCH ?)"
-                            " OR c.quick_paste = ?)");
-    where_param(w, buf_steal(&match, NULL));
-    where_param(w, xstrdup(q->query));
-  } else {
-    buf_free(&match);
+  return match.len ? buf_steal(&match, NULL) : (buf_free(&match), NULL);
+}
+
+/* walk: the caller will scan an order index and test each clip, so the FTS
+ * membership must not be usable as a rowid lookup (the unary +). */
+static void build_where(struct db *db, const struct list_query *q, struct where *w, bool walk)
+{
+  buf_append_str(&w->sql, " WHERE 1");
+  if (!q->all_groups) {
+    if (q->group_id) {
+      char *id = xasprintf("%lld", (long long)q->group_id);
+      buf_append_str(&w->sql, " AND c.group_id = CAST(? AS INTEGER)");
+      where_param(w, id);
+      w->group_scoped = true;
+    } else if (!setting_bool(db, "show_grouped_in_history")) {
+      buf_append_str(&w->sql, " AND c.group_id IS NULL");
+      w->group_scoped = true;
+    }
+  }
+  if (!q->query || !q->query[0]) return;
+  char *match = split_terms(q->query, w);
+  if (match) {
+    buf_append_str(&w->sql, walk ? " AND +c.id IN (SELECT rowid FROM clips_fts WHERE clips_fts MATCH ?)"
+                                 : " AND c.id IN (SELECT rowid FROM clips_fts WHERE clips_fts MATCH ?)");
+    where_param(w, match);
   }
 }
 
@@ -493,46 +503,117 @@ static void bind_where(sqlite3_stmt *st, const struct where *w)
   for (size_t i = 0; i < w->n; i++) sqlite3_bind_text(st, (int)i + 1, w->params[i], -1, SQLITE_STATIC);
 }
 
+#define COUNT_CAP 1000
 #define ORDER_HISTORY " ORDER BY (c.sticky_order IS NULL), c.sticky_order, c.last_used_at DESC, c.id DESC"
+
+/* How many full-text hits make a term "common": beyond this, walking the
+ * history in order and keeping the first matches beats sorting them all. */
+#define PROBE_CAP 2000
+
+static int64_t fts_probe(struct db *db, const char *match)
+{
+  sqlite3_stmt *st = dbi_prep(db, "SELECT count(*) FROM (SELECT rowid FROM clips_fts WHERE clips_fts MATCH ? LIMIT ?)");
+  int64_t n = 0;
+  if (st) {
+    sqlite3_bind_text(st, 1, match, -1, SQLITE_STATIC);
+    sqlite3_bind_int(st, 2, PROBE_CAP);
+    if (sqlite3_step(st) == SQLITE_ROW) n = sqlite3_column_int64(st, 0);
+    sqlite3_finalize(st);
+  }
+  return n;
+}
 
 cJSON *db_list(struct db *db, const struct list_query *q)
 {
-  struct where w = { 0 };
-  build_where(db, q, &w);
   cJSON *out = cJSON_CreateObject();
   cJSON *rows = cJSON_AddArrayToObject(out, "rows");
+  bool searching = q->query && q->query[0];
+  int limit = q->limit > 0 ? q->limit : 200;
+  int offset = q->offset > 0 ? q->offset : 0;
 
+  /* Plan: plain history reads the order index directly. A search whose
+   * full-text terms are rare collects its matches and sorts them; one whose
+   * terms are common (or that has only short LIKE terms) walks the order
+   * index and stops at the first page of matches. */
+  bool walk = false, fts = false;
+  if (searching) {
+    char *match = split_terms(q->query, NULL);
+    /* Short terms alone: LIKE has no index to walk wisely; let SQLite plan. */
+    fts = match != NULL;
+    walk = fts && fts_probe(db, match) >= PROBE_CAP;
+    free(match);
+  }
+  struct where w = { 0 };
+  build_where(db, q, &w, walk);
+  const char *indexed = !walk ? "" : w.group_scoped ? " INDEXED BY clips_group_order" : " INDEXED BY clips_order";
+
+  /* Ditto: a clip whose quick-paste word is exactly the search comes first. */
+  int64_t qp_id = 0;
+  if (searching && !offset) {
+    sqlite3_stmt *st = dbi_prep(db, "SELECT " ROW_COLS " FROM clips c WHERE c.quick_paste = ?");
+    if (st) {
+      sqlite3_bind_text(st, 1, q->query, -1, SQLITE_STATIC);
+      if (sqlite3_step(st) == SQLITE_ROW) {
+        cJSON *row = row_json(db, st);
+        qp_id = (int64_t)cJSON_GetNumberValue(cJSON_GetObjectItem(row, "id"));
+        cJSON_AddItemToArray(rows, row);
+      }
+      sqlite3_finalize(st);
+    }
+  }
+
+  /* Two steps: pick the page by id alone, then fetch display columns for
+   * those rows only; ROW_COLS' subqueries would otherwise run for every
+   * candidate before the sort. Not buf_printf: ROW_COLS holds a '%'. */
   struct buf sql = { 0 };
-  /* Not buf_printf: ROW_COLS holds a LIKE pattern with a literal '%'. */
-  buf_append_str(&sql, "SELECT " ROW_COLS " FROM clips c");
+  buf_append_str(&sql, "SELECT " ROW_COLS " FROM (SELECT c.id AS pid FROM clips c");
+  buf_append_str(&sql, indexed);
   buf_append_str(&sql, (char *)w.sql.data);
-  /* An exact quick-paste word jumps ahead of everything (Ditto behaviour). */
-  if (q->query && q->query[0]) buf_append_str(&sql, " ORDER BY (c.quick_paste IS ?) DESC, (c.sticky_order IS NULL),"
-                                                    " c.sticky_order, c.last_used_at DESC, c.id DESC");
-  else buf_append_str(&sql, ORDER_HISTORY);
-  buf_append_str(&sql, " LIMIT ? OFFSET ?");
+  buf_append_str(&sql, ORDER_HISTORY " LIMIT ? OFFSET ?) AS page JOIN clips c ON c.id = page.pid" ORDER_HISTORY);
   sqlite3_stmt *st = dbi_prep(db, (char *)sql.data);
   buf_free(&sql);
+  bool qp_matched = false;
+  int page_rows = 0;
   if (st) {
     bind_where(st, &w);
-    int k = (int)w.n + 1;
-    if (q->query && q->query[0]) sqlite3_bind_text(st, k++, q->query, -1, SQLITE_STATIC);
-    sqlite3_bind_int(st, k++, q->limit > 0 ? q->limit : 200);
-    sqlite3_bind_int(st, k, q->offset > 0 ? q->offset : 0);
-    while (sqlite3_step(st) == SQLITE_ROW) cJSON_AddItemToArray(rows, row_json(db, st));
+    sqlite3_bind_int(st, (int)w.n + 1, limit);
+    sqlite3_bind_int(st, (int)w.n + 2, offset);
+    while (sqlite3_step(st) == SQLITE_ROW) {
+      page_rows++;
+      if (qp_id && sqlite3_column_int64(st, 0) == qp_id) { qp_matched = true; continue; }
+      cJSON_AddItemToArray(rows, row_json(db, st));
+    }
     sqlite3_finalize(st);
   }
 
-  buf_printf(&sql, "SELECT count(*) FROM clips c%s", (char *)w.sql.data);
-  st = dbi_prep(db, (char *)sql.data);
-  buf_free(&sql);
+  /* A search's count stops at COUNT_CAP ("1000+ found"): counting every hit
+   * of a common word would cost more than the page itself. Plain history
+   * counts exactly. */
   int64_t total = 0;
+  bool counted = false;
+  if (walk && !w.like_terms && !w.group_scoped) {
+    /* The probe already found PROBE_CAP (> COUNT_CAP) hits and nothing
+     * else narrows them: no need to count again. */
+    total = COUNT_CAP + 1;
+    counted = true;
+  } else if (searching) {
+    buf_append_str(&sql, "SELECT count(*) FROM (SELECT 1 FROM clips c");
+    buf_append_str(&sql, indexed);
+    buf_printf(&sql, "%s LIMIT %d)", (char *)w.sql.data, COUNT_CAP + 1);
+  } else {
+    buf_printf(&sql, "SELECT count(*) FROM clips c%s", (char *)w.sql.data);
+  }
+  st = counted ? NULL : dbi_prep(db, (char *)sql.data);
+  buf_free(&sql);
   if (st) {
     bind_where(st, &w);
     if (sqlite3_step(st) == SQLITE_ROW) total = sqlite3_column_int64(st, 0);
     sqlite3_finalize(st);
   }
-  cJSON_AddNumberToObject(out, "total", (double)total);
+  /* The quick-paste clip counts once, whether or not its text matched too. */
+  if (qp_id && !qp_matched && page_rows < limit) total++;
+  cJSON_AddNumberToObject(out, "total", (double)MIN(total, COUNT_CAP));
+  cJSON_AddBoolToObject(out, "more", total > COUNT_CAP);
   where_free(&w);
   return out;
 }
@@ -541,7 +622,7 @@ int64_t db_id_at_position(struct db *db, int pos)
 {
   struct list_query q = { 0 };
   struct where w = { 0 };
-  build_where(db, &q, &w);
+  build_where(db, &q, &w, false);
   struct buf sql = { 0 };
   buf_printf(&sql, "SELECT c.id FROM clips c%s" ORDER_HISTORY " LIMIT 1 OFFSET ?", (char *)w.sql.data);
   sqlite3_stmt *st = dbi_prep(db, (char *)sql.data);
@@ -940,6 +1021,29 @@ int db_blob_gc(struct db *db)
   }
   closedir(top);
   return removed;
+}
+
+static int64_t db_bytes(struct db *db)
+{
+  sqlite3_stmt *st = dbi_prep(db, "SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()");
+  int64_t n = st && sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+  sqlite3_finalize(st);
+  return n;
+}
+
+cJSON *db_vacuum(struct db *db)
+{
+  int64_t before = db_bytes(db);
+  int gc = db_blob_gc(db);
+  dbi_exec(db, "INSERT INTO clips_fts(clips_fts) VALUES ('optimize')");
+  dbi_exec(db, "VACUUM");
+  dbi_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)");
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "before", (double)before);
+  cJSON_AddNumberToObject(r, "after", (double)db_bytes(db));
+  cJSON_AddNumberToObject(r, "blobs_removed", gc);
+  log_info("compacted the database: %lld → %lld bytes", (long long)before, (long long)db_bytes(db));
+  return r;
 }
 
 cJSON *db_stats(struct db *db)

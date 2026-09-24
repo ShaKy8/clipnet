@@ -147,6 +147,7 @@ FloatingWindow {
         Section {
           title: "Behaviour"
           SettingToggle { key: "show_thumbnails"; text: "Show image thumbnails in the list" }
+          SettingToggle { key: "preview_on_hover"; text: "Preview a clip when the mouse rests on it" }
           SettingToggle { key: "show_grouped_in_history"; text: "Show clips that are in groups in History too" }
           SettingToggle {
             key: "esc_clears_search"
@@ -702,6 +703,13 @@ FloatingWindow {
               text: "Import this file"
               onClicked: Daemon.call("import", { format: "clipnet-json", path: exportPath.text }, (r, err) => {
                 dataResult.text = err ? err.message : "Imported " + r.added + " clips (" + r.duplicates + " already here)."
+                stats.load()
+              })
+            }
+            Btn {
+              text: "Compact the database"
+              onClicked: Daemon.call("vacuum", {}, (r, err) => {
+                dataResult.text = err ? err.message : "Compacted: " + Format.size(r.before) + " \u2192 " + Format.size(r.after) + "."
                 stats.load()
               })
             }

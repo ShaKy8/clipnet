@@ -36,6 +36,12 @@ ShellRoot {
     description: "Show or hide the clipboard history"
     onPressed: popup.toggle()
   }
+  // Sent by the daemon's paste keystroke when it is done (not bound to keys).
+  GlobalShortcut {
+    appid: "clipnet"; name: "pasted"
+    description: "CLIP//NET internal: a paste finished"
+    onPressed: popup.pasted()
+  }
   GlobalShortcut {
     appid: "clipnet"; name: "show"
     description: "Show the clipboard history"

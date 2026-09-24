@@ -17,6 +17,7 @@ Item {
   property int lineHeight: Theme.px(24)
   property real now: Date.now()
 
+  signal hoverChanged(bool hovering)
   signal clicked(var mouse)
   signal doubleClicked()
   signal rightClicked()
@@ -34,7 +35,7 @@ Item {
     radius: Math.min(Theme.radius, 6)
   }
 
-  HoverHandler { id: hover }
+  HoverHandler { id: hover; onHoveredChanged: row.hoverChanged(hovered) }
 
   MouseArea {
     anchors.fill: parent

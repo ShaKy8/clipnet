@@ -126,6 +126,8 @@ cJSON *db_groups_list(struct db *db);
 char *db_setting_raw(struct db *db, const char *key);
 int db_setting_put(struct db *db, const char *key, const char *json);
 
+/* Compact: blob GC, FTS optimize, VACUUM. Returns {before, after} bytes. */
+cJSON *db_vacuum(struct db *db);
 /* Apply retention settings; returns the number of clips removed. */
 int db_retention(struct db *db, int64_t now);
 /* Remove blob files that no format references. Returns files removed. */

@@ -54,6 +54,13 @@ build/tests/%: tests/%.c tests/harness.c tests/harness.h $(OBJ) | build/tests
 build/tests/offer: tests/tools/offer.c build/gen-ext-data-control-v1.o | build/tests
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-missing-prototypes -o $@ $^ $(LDLIBS)
 
+build/tests/bench: tests/tools/bench.c $(OBJ) | build/tests
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Wno-missing-prototypes -o $@ $^ $(LDLIBS)
+
+# Timings with a big history (N clips, default 50000).
+bench: build/tests/bench
+	build/tests/bench $(N)
+
 test: $(TESTS)
 	@set -e; for t in $(TESTS); do $$t; done
 
@@ -73,5 +80,5 @@ gen build build/tests:
 clean:
 	rm -rf build gen clipnetd
 
-.PHONY: all test test-live asan clean
+.PHONY: all test test-live bench asan clean
 -include $(wildcard build/*.d)

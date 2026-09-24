@@ -5,10 +5,10 @@
 # clip back with clipnetd, check wl-paste gets every format byte for byte.
 #
 # The clipboard is saved first and restored at the end (text only: an image
-# on the clipboard when the test starts is not restored). A running
-# clipnetd.service is left alone; the test daemon uses its own socket and
-# data directory, but both daemons will see the test copies, so the real one
-# stores them too unless it is paused.
+# on the clipboard when the test starts is not restored). The test daemon
+# uses its own socket, data and config directories. A running clipnetd (the
+# installed one) would see the test copies too, so it is paused for the run
+# and resumed afterwards, unless it was already paused.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "$0")")/../.." && pwd)"
@@ -29,6 +29,15 @@ fi
 # stdout/stderr or anything reading this script's output never sees EOF.
 wlcopy() { command wl-copy "$@" >/dev/null 2>&1; }
 
+# Keep the user's own clipnetd from recording the test's copies.
+REAL=(env -u CLIPNET_TEST "$BIN")
+real_paused_by_us=false
+if "${REAL[@]}" --ctl '{"op":"ping"}' >/dev/null 2>&1; then
+  if [[ $("${REAL[@]}" --ctl '{"op":"state.get"}' | jq .paused) == false ]]; then
+    "${REAL[@]}" --ctl '{"op":"pause","minutes":10}' >/dev/null && real_paused_by_us=true
+  fi
+fi
+
 pid=
 cleanup() {
   local rc=$? status=0
@@ -45,6 +54,9 @@ cleanup() {
     rc=1
   fi
   rm -rf "$WORK" "$SOCK_DIR"
+  # Last: the restored clipboard is the user's own, not a test copy.
+  sleep 0.2
+  $real_paused_by_us && "${REAL[@]}" --ctl '{"op":"resume"}' >/dev/null 2>&1
   exit "$rc"
 }
 trap cleanup EXIT

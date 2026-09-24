@@ -679,6 +679,11 @@ static void op_import(struct call *k)
   ok(k, r);
 }
 
+static void op_vacuum(struct call *k)
+{
+  ok(k, db_vacuum(k->app->db));
+}
+
 static void op_retention(struct call *k)
 {
   int n = db_retention(k->app->db, now_ms());
@@ -722,6 +727,7 @@ static const struct {
   { "settings.set", op_settings_set },
   { "import", op_import },
   { "retention.run", op_retention },
+  { "vacuum", op_vacuum },
   { "update", op_update },
   { "set_text", op_set_text },
   { "move", op_move },

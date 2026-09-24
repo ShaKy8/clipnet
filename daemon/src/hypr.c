@@ -28,6 +28,7 @@ struct hypr {
   int backoff_ms;
   char *active_class;
   char *active_title;
+  char *active_address;
   hypr_reload_cb reload_cb;
   void *reload_ctx;
   hypr_window_cb window_cb;
@@ -146,9 +147,17 @@ static void handle_event(struct hypr *h, char *line)
   if (!strcmp(name, "activewindow")) {
     /* "CLASS,TITLE": classes never contain a comma, titles may. */
     const char *comma = strchr(data, ',');
+    /* Also sent whenever the focused window's title changes (a terminal
+     * does that constantly), so it only updates the cached class/title;
+     * a real focus change is activewindowv2 with a new address. */
     if (comma) set_active(h, data, (size_t)(comma - data), comma + 1);
     else set_active(h, data, strlen(data), NULL);
-    if (h->window_cb) h->window_cb(h->window_ctx);
+  } else if (!strcmp(name, "activewindowv2")) {
+    if (!h->active_address || strcmp(h->active_address, data)) {
+      free(h->active_address);
+      h->active_address = xstrdup(data);
+      if (h->window_cb) h->window_cb(h->window_ctx);
+    }
   } else if (!strcmp(name, "closewindow")) {
     if (h->window_cb) h->window_cb(h->window_ctx);
   } else if (!strcmp(name, "configreloaded")) {
@@ -259,6 +268,7 @@ void hypr_disconnect(struct hypr *h)
   buf_free(&h->ebuf);
   free(h->active_class);
   free(h->active_title);
+  free(h->active_address);
   free(h->req_path);
   free(h->evt_path);
   free(h);
@@ -355,6 +365,9 @@ static int send_chord(struct hypr *h, int delay_ms, const struct paste_key *ov, 
              "  hl.dispatch(hl.dsp.send_key_state({ mods = m, key = k, state = \"down\" }))\n"
              "  hl.timer(function()\n"
              "    hl.dispatch(hl.dsp.send_key_state({ mods = m, key = k, state = \"up\" }))\n"
+             /* Tell the popup the keys are done: with "keep open" (Ctrl+Space)
+              * it may now come back without stealing the paste's focus. */
+             "    pcall(hl.dispatch, hl.dsp.global(\"clipnet:pasted\"))\n"
              "  end, { timeout = 50, type = \"oneshot\" })\n"
              "end\n"
              "hl.timer(go, { timeout = %d, type = \"oneshot\" })\n"

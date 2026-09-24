@@ -84,6 +84,16 @@ static void on_hypr_reload(void *ctx)
   hotkeys_sync(ctx);
 }
 
+static void on_startup_probe(void *ctx, bool has_selection)
+{
+  struct app *app = ctx;
+  if (has_selection) return;
+  int64_t newest = db_id_at_position(app->db, 0);
+  if (!newest) return;
+  log_info("clipboard was empty at start; restoring the newest clip");
+  serve_clip(app->serve, newest, SERVE_ALL);
+}
+
 static void on_window_change(void *ctx)
 {
   capture_owner_may_have_left(ctx);
@@ -217,6 +227,10 @@ int main(int argc, char **argv)
     else if (until) app_pause(&app, (int)((until - now_ms() + 59999) / 60000));
   }
   app.retention_timer = loop_timer(app.loop, RETENTION_FIRST_MS, on_retention, &app);
+
+  /* After a restart (a crash, an update, a new login) the clipboard may be
+   * empty because the previous daemon owned it. Put the newest clip back. */
+  if (app.wl && setting_bool(app.db, "keep_alive")) wl_probe_selection(app.wl, on_startup_probe, &app);
 
   log_info("ready on %s", socket_path);
   int rc = loop_run(app.loop);

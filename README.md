@@ -28,11 +28,14 @@ scripts/clipnet settings     the settings window         (or set KEY VAL from a 
 | Ctrl+G | Groups ↔ History | Backspace (empty search) | up one level |
 | F7 / Ctrl+F7 | new group from the selection / empty group | F2 | rename the group |
 | Ctrl+C | copy without pasting | Alt+C | clear the search |
+| Ctrl+Space | keep the popup open after pasting | Ctrl+F2 | compare two selected clips side by side |
 | Ctrl+, | settings | Esc | clear the search, then close |
 
 These are Ditto's own defaults, taken from its `ActionEnums.cpp`: Enter,
 Shift+Enter, Ctrl+1–0, F3, Ctrl+G, F7/Ctrl+F7, Ctrl+N, Ctrl+E, Alt+Enter, Alt+C,
-Ctrl+C and Delete. The rest are CLIP//NET's own.
+Ctrl+C, Ctrl+Space, Ctrl+F2 and Delete. The rest are CLIP//NET's own. Ditto's
+Ctrl+F2 opens an external diff tool; CLIP//NET's comparison is built in.
+Resting the mouse on a row shows more of the clip.
 
 A **quick-paste word** (set in Properties) works like Ditto's: type the word,
 its clip jumps to the top, and Enter pastes it. A clip's **hotkey** pastes it
@@ -95,6 +98,27 @@ Hyprland ── Ctrl+' → hl.dsp.global("clipnet:toggle") ──► quickshell 
   it captured. It never does this after a password manager cleared the
   clipboard on purpose.
 
+## How it stays cheap
+
+Measured on this machine with Hyprland 0.56 and SQLite 3.53:
+
+- **Idle:** the daemon sleeps in `epoll_wait`, with no timers apart from an
+  hourly retention pass. It wakes only to read Hyprland's event stream, and it
+  only acts on a real focus change. About 6 MB of memory.
+- **Opening the popup:** the popup is always loaded, so opening it is a
+  visibility flip plus one request for the cursor position and the first
+  300 rows. That request takes 3 ms with 50,000 clips, because an index
+  matches the list order exactly (sticky first, then most recent).
+- **Search, at 50,000 clips (`make -C daemon bench`):** a rare term takes
+  under 1 ms. A word found in half the history takes about 18 ms: the daemon
+  first probes how common a term is, then either sorts the few matches or
+  walks the history in order and stops at a page's worth. One- or
+  two-character searches can't use the trigram index and take about 60 ms;
+  they only happen for a moment while you type.
+- **Capture:** about 0.3 ms per clip plus the time to read it from the app.
+  Formats are read one at a time without blocking the daemon, and pastes of
+  any size are streamed.
+
 ## Privacy
 
 - Nothing leaves the machine. Files are private (0600/0700), deleted clips are
@@ -109,14 +133,17 @@ Hyprland ── Ctrl+' → hl.dsp.global("clipnet:toggle") ──► quickshell 
 ## Development
 
 ```
-make test        unit (C), config-block and IPC tests; no session needed
+make test        unit (C and QML), config-block and IPC tests; no session needed
 make test-live   captures and serves through the real clipboard on a throwaway
-                 database; saves and restores your clipboard
+                 database; saves and restores your clipboard, and pauses your
+                 own clipnetd meanwhile so test copies never reach your history
 make asan        unit tests under AddressSanitizer + UBSan
+make -C daemon bench   timings with 50,000 synthetic clips (N=… to change)
 CLIPNETD=/path/to/asan/clipnetd tests/integration/live_test.sh
 ```
 
-`docs/PROTOCOL.md` is the socket API, and exports are self-describing JSON
+`docs/PROTOCOL.md` is the socket API, `docs/SCHEMA.md` is the database
+contract (including what a macOS port maps differently), and exports are self-describing JSON
 (`"format": "clipnet-export"`), with every format of every clip base64-encoded. The schema lives in
 `daemon/src/schema.c` and uses only portable types: ms timestamps, MIME
 names, uuids.

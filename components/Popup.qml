@@ -25,6 +25,7 @@ PanelWindow {
   property var rows: []          // group rows ({isGroup: true, ...}) then clip rows
   property int groupRows: 0
   property int total: 0
+  property bool totalMore: false   // the daemon stopped counting (1000+)
   property string query: ""
   property bool previewOpen: false
   property var detail: null
@@ -43,6 +44,13 @@ PanelWindow {
   property var transforms: []
 
   property Item overlay: null    // the open dialog or menu, if any
+
+  // Ditto's Ctrl+Space: stay open after pasting. The popup comes back once
+  // the paste keystroke is done (the daemon's Lua sends clipnet:pasted), so
+  // it never takes focus back before the target app has received the keys.
+  property bool keepOpen: false
+  property bool reopenPending: false
+  property var hoverTip: null     // { row, detail, y } while a hover preview shows
 
   readonly property int rowHeight: Math.round(Theme.fontSize * 2)
   readonly property int visibleRows: Daemon.setting("popup_rows", 14)
@@ -64,10 +72,16 @@ PanelWindow {
 
   function toggle() { open ? hide() : show() }
 
-  function show() {
+  function show(keepState) {
     Daemon.call("show_context", {}, (ctx, err) => {
-      place(ctx || {})
+      if (!keepState) place(ctx || {})
       closeOverlay()
+      if (keepState) {
+        offlineText = err ? "clipnetd is not running — start it with: clipnet start" : ""
+        open = true
+        search.forceActiveFocus()
+        return
+      }
       search.text = ""
       query = ""
       picked = {}
@@ -83,8 +97,18 @@ PanelWindow {
     })
   }
 
+  // The paste keystroke finished (see keepOpen).
+  function pasted() {
+    if (!reopenPending) return
+    reopenPending = false
+    reopenFallback.stop()
+    if (keepOpen && !open) show(true)
+  }
+  Timer { id: reopenFallback; interval: 2000; onTriggered: popup.pasted() }
+
   function hide() {
     if (!open) return
+    hoverTip = null
     closeOverlay()
     lastPos[screen ? screen.name : ""] = { x: cardX, y: cardY }
     open = false
@@ -125,11 +149,12 @@ PanelWindow {
   function refresh(resetSelection) {
     const keepId = currentRow ? (currentRow.isGroup ? "g" : "c") + currentRow.id : ""
     const gRows = groupsRoot ? childGroups(0) : groupId ? childGroups(groupId) : []
-    const done = (clips, count) => {
+    const done = (clips, count, more) => {
       stale = false
       rows = gRows.concat(clips)
       groupRows = gRows.length
       total = count
+      totalMore = !!more
       let idx = 0
       if (!resetSelection && keepId) {
         const found = rows.findIndex(x => (x.isGroup ? "g" : "c") + x.id === keepId)
@@ -142,7 +167,7 @@ PanelWindow {
     // Searching in the Groups list looks through every clip.
     const args = { query: query, limit: 300 }
     if (groupId && !groupsRoot) args.group = groupId
-    Daemon.call("list", args, (r) => { if (r) done(r.rows, r.total) })
+    Daemon.call("list", args, (r) => { if (r) done(r.rows, r.total, r.more) })
   }
 
   function loadGroups(then) {
@@ -244,6 +269,7 @@ PanelWindow {
 
   function paste(ids, mode, transform) {
     if (!ids.length) return
+    if (keepOpen) { reopenPending = true; reopenFallback.restart() }
     hide()
     const args = { ids: ids, mode: mode || "normal" }
     if (transform) args.transform = transform
@@ -383,6 +409,21 @@ PanelWindow {
     })
   }
 
+  // Ctrl+F2: the two picked clips, or one picked clip and the current one.
+  function compareClips() {
+    let ids = rows.filter(r => !r.isGroup && picked[r.id]).map(r => r.id)
+    if (ids.length === 1 && currentClip && currentClip.id !== ids[0]) ids.push(currentClip.id)
+    if (ids.length !== 2) { notify("Pick two clips to compare: Ctrl+click them, then Ctrl+F2."); return }
+    Daemon.call("get", { id: ids[0] }, (a, err) => {
+      if (!a) return report(null, err)
+      Daemon.call("get", { id: ids[1] }, (b, err2) => {
+        if (!b) return report(null, err2)
+        if (a.text === null || b.text === null) { notify("Only clips with text can be compared."); return }
+        openOverlay(compareComp, { leftClip: a, rightClip: b })
+      })
+    })
+  }
+
   function properties() {
     const c = currentClip
     if (!c) return
@@ -429,6 +470,34 @@ PanelWindow {
 
   onPreviewOpenChanged: if (previewOpen) loadDetail()
 
+  // ---- hover preview -------------------------------------------------------
+  // Resting on a row for a moment shows more of it: the full text, or the
+  // image at a readable size. Any key, click or scroll hides it.
+
+  property Item hoverItem: null
+  property var hoverClip: null
+  function hoverRow(item, clip) {
+    hoverItem = item
+    hoverClip = clip
+    hoverTip = null
+    if (item && Daemon.setting("preview_on_hover", true) && !previewOpen && !overlay) hoverTimer.restart()
+    else hoverTimer.stop()
+  }
+  Timer {
+    id: hoverTimer
+    interval: 600
+    onTriggered: {
+      const item = popup.hoverItem, clip = popup.hoverClip
+      if (!item || !clip) return
+      Daemon.call("get", { id: clip.id }, d => {
+        if (!d || popup.hoverClip !== clip || !popup.hoverItem) return
+        const p = item.mapToItem(card, 0, item.height)
+        popup.hoverTip = { detail: d, y: p.y }
+      })
+    }
+  }
+  Connections { target: list; function onContentYChanged() { popup.hoverTip = null; hoverTimer.stop() } }
+
   // ---- dialogs and menus ---------------------------------------------------
 
   Component { id: confirmComp; Confirm {} }
@@ -436,6 +505,7 @@ PanelWindow {
   Component { id: editorComp; ClipEditor {} }
   Component { id: propsComp; Properties {} }
   Component { id: menuComp; Menu {} }
+  Component { id: compareComp; CompareView {} }
 
   function openOverlay(comp, props, wire) {
     closeOverlay()
@@ -495,6 +565,7 @@ PanelWindow {
       { label: "Paste as plain text", action: "paste-plain", shortcut: "Shift+Enter" },
       { label: "Special Paste", submenu: specialPasteItems() },
       { label: "Copy (don't paste)", action: "copy", shortcut: "Ctrl+C" },
+      { label: "Compare two clips", action: "compare", shortcut: "Ctrl+F2", enabled: Object.keys(picked).length >= 1 },
       { separator: true },
       { label: "Edit…", action: "edit", shortcut: "Ctrl+E", enabled: one },
       { label: "Properties…", action: "properties", shortcut: "Alt+Enter", enabled: one },
@@ -519,6 +590,7 @@ PanelWindow {
     case "paste-plain": paste(targetIds(), "plain"); break
     case "transform": paste(targetIds(), "normal", data); break
     case "copy": copyOnly(targetIds()); break
+    case "compare": compareClips(); break
     case "edit": editClip(false); break
     case "new": editClip(true); break
     case "properties": properties(); break
@@ -559,6 +631,8 @@ PanelWindow {
   }
 
   function handleKey(e) {
+    hoverTip = null
+    hoverTimer.stop()
     const ctrl = e.modifiers & Qt.ControlModifier
     const shift = e.modifiers & Qt.ShiftModifier
     const alt = e.modifiers & Qt.AltModifier
@@ -621,6 +695,10 @@ PanelWindow {
       if (targetIds().length) menuAt(specialPasteItems(), p.x, p.y)
     } else if (k === Qt.Key_Menu || (shift && k === Qt.Key_F10)) {
       contextMenuAtCurrent()
+    } else if (ctrl && k === Qt.Key_Space) {
+      keepOpen = !keepOpen
+    } else if (ctrl && k === Qt.Key_F2) {
+      compareClips()
     } else if (ctrl && k === Qt.Key_Comma) {
       hide()
       settingsRequested()
@@ -650,9 +728,11 @@ PanelWindow {
 
   Rectangle {
     id: card
-    x: popup.cardX
+    // A wide dialog (Compare) may push the card left to stay on screen.
+    x: Math.max(Theme.px(8), Math.min(popup.cardX, popup.width - width - Theme.px(8)))
     y: popup.cardY
-    width: popup.listWidth + (popup.previewOpen ? popup.paneWidth + popup.pad : 0) + popup.pad * 2
+    width: Math.max(popup.listWidth + (popup.previewOpen ? popup.paneWidth + popup.pad : 0) + popup.pad * 2,
+                    popup.overlay && popup.overlay.wantWidth ? Math.min(popup.overlay.wantWidth, popup.width - Theme.px(16)) : 0)
     height: searchBox.height + listBox.height + status.height + popup.pad * 4
     color: Theme.card
     border.color: Theme.border
@@ -715,6 +795,13 @@ PanelWindow {
         anchors.rightMargin: Theme.px(8)
         anchors.verticalCenter: parent.verticalCenter
         spacing: Theme.px(6)
+        Text {
+          visible: popup.keepOpen
+          text: "\uf08d KEEP OPEN"
+          color: Theme.accent
+          font.family: Theme.fontFamily
+          font.pixelSize: Theme.fontSize - 2
+        }
         Text {
           visible: Daemon.paused
           text: Daemon.pausedUntil > 0 ? " PAUSED " + Math.max(1, Math.ceil((Daemon.pausedUntil - ticker.now) / 60000)) + " min"
@@ -791,6 +878,7 @@ PanelWindow {
                 list.currentIndex = rowLoader.index
               }
               onDoubleClicked: popup.paste([rowLoader.modelData.id], "normal")
+              onHoverChanged: h => popup.hoverRow(h ? this : null, rowLoader.modelData)
               onRightClicked: {
                 if (!popup.picked[rowLoader.modelData.id]) popup.picked = {}
                 list.currentIndex = rowLoader.index
@@ -816,6 +904,51 @@ PanelWindow {
             : popup.groupsRoot ? "No groups yet. F7 makes one from the selected clips, Ctrl+F7 an empty one."
             : popup.groupId ? "This group is empty. Move clips here with the right-click menu."
             : "Nothing copied yet"
+      }
+    }
+
+    Rectangle {
+      id: tip
+      readonly property var d: popup.hoverTip ? popup.hoverTip.detail : null
+      readonly property bool isImage: !!d && d.kind === "image" && !!d.image
+      visible: !!popup.hoverTip && !popup.overlay
+      z: 40
+      x: listBox.x + Theme.px(28)
+      width: listBox.width - Theme.px(36)
+      height: Math.min(isImage ? Theme.px(260) : tipText.implicitHeight + Theme.px(16), Theme.px(300))
+      // Below the row, or above it when there is no room.
+      y: {
+        if (!popup.hoverTip) return 0
+        const below = popup.hoverTip.y + Theme.px(2)
+        return below + height <= card.height - Theme.px(8) ? below : Math.max(Theme.px(8), popup.hoverTip.y - popup.rowHeight - height - Theme.px(2))
+      }
+      color: Theme.card
+      radius: Math.min(Theme.radius, 6)
+      border.width: 1
+      border.color: Theme.accent
+      clip: true
+      Text {
+        id: tipText
+        visible: !tip.isImage
+        x: Theme.px(8)
+        y: Theme.px(8)
+        width: parent.width - Theme.px(16)
+        wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+        textFormat: Text.PlainText
+        maximumLineCount: 16
+        elide: Text.ElideRight
+        text: !tip.d ? "" : (tip.d.text || tip.d.preview || "").substring(0, 4000)
+        color: Theme.text
+        font.family: Theme.fontFamily
+        font.pixelSize: Theme.fontSize - 1
+      }
+      Image {
+        visible: tip.isImage
+        anchors.fill: parent
+        anchors.margins: Theme.px(6)
+        source: tip.isImage ? "file://" + tip.d.image : ""
+        fillMode: Image.PreserveAspectFit
+        asynchronous: true
       }
     }
 
@@ -852,7 +985,8 @@ PanelWindow {
           const n = Object.keys(popup.picked).length
           let s = where
           if (!(popup.groupsRoot && !popup.query))
-            s += " · " + (popup.query ? popup.total + " found" : popup.total + (popup.total === 1 ? " clip" : " clips"))
+            s += " · " + (popup.query ? popup.total + (popup.totalMore ? "+" : "") + " found"
+                                      : popup.total + (popup.total === 1 ? " clip" : " clips"))
           if (n) s += " · " + n + " selected"
           return s
         }

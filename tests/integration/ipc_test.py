@@ -204,6 +204,11 @@ def main():
             check("examples missing only for a relocated binary", "not found" in ex["error"]["message"])
         check("unknown script refused", not c.call("scripts.enable", name="nope.lua", enabled=True)["ok"])
 
+        vac = c.ok("vacuum")
+        check("vacuum reports sizes", vac["before"] > 0 and vac["after"] > 0)
+        r = c.ok("list", query="alpha")
+        check("search reports whether it stopped counting", r["more"] is False and r["total"] >= 1)
+
         deleted = c.ok("delete", ids=[ids[3]])
         check("delete", deleted["deleted"] == 1)
 

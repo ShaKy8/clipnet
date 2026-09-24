@@ -132,8 +132,16 @@ static const char *const v2 =
   "  enabled INTEGER NOT NULL DEFAULT 0,"
   "  ord REAL NOT NULL DEFAULT 0);";
 
+/* v3: indexes in exactly the list order (sticky first, then most recent),
+ * so opening the popup reads 300 index entries instead of sorting the whole
+ * history. The expressions must match ORDER_HISTORY in db.c. */
+static const char *const v3 =
+  "CREATE INDEX clips_order ON clips((sticky_order IS NULL), sticky_order, last_used_at DESC, id DESC);"
+  "CREATE INDEX clips_group_order ON clips(group_id, (sticky_order IS NULL), sticky_order, last_used_at DESC, id DESC);"
+  "DROP INDEX clips_group;";
+
 /* Each entry upgrades from version i to i+1. Append only; never edit. */
-static const char *const migrations[] = { v1, v2 };
+static const char *const migrations[] = { v1, v2, v3 };
 
 int schema_version_latest(void)
 {
