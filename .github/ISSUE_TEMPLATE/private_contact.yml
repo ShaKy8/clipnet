@@ -1,0 +1,17 @@
+name: Private contact request
+description: Ask the maintainer for a private way to talk, e.g. to report a code-of-conduct problem.
+title: Private contact request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Don't describe the matter here: this issue is public.** Just submit it, and the maintainer
+        will reply with a private way to talk. For a security vulnerability, use the
+        [private security form](https://github.com/ShaKy8/clipnet/security/advisories/new) instead.
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirm
+      options:
+        - label: I haven't included any details of the matter in this issue.
+          required: true

@@ -1,0 +1,59 @@
+name: Bug report
+description: Something in CLIP//NET doesn't work the way it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please **don't paste real clipboard contents** or attach your
+        history database (`~/.local/share/clipnet`). Demo text shows a problem just as well.
+        For a security problem, use the [private form](https://github.com/ShaKy8/clipnet/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+      placeholder: |
+        I copied an image in Chromium, pressed Ctrl+' and Enter in LibreOffice…
+        Expected: the image pasted. Instead: nothing pasted.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `scripts/clipnet status`
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: "`daemon/clipnetd --version`, `hyprctl version | head -1`, `quickshell --version`, and your Omarchy version."
+      placeholder: clipnetd 1.0.0 · Hyprland 0.56.2 · quickshell 0.3.1 · Omarchy 4.0.4
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        `journalctl --user -u clipnetd --since "10 min ago"`, and for popup problems `quickshell log -p <your checkout>`.
+        CLIP//NET never logs clip contents, but your own scripts' `clipnet.log()` lines appear here too, so read before pasting.
+      render: shell
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: This report contains no real clipboard contents, passwords or tokens.
+          required: true
