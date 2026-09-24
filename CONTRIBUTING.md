@@ -24,8 +24,9 @@ entire copy history.
 
 **Security issues** (anything that could leak clipboard contents, or let
 another user or process reach the daemon): don't describe them in a public
-issue. Open an issue that just asks for a private contact, and we'll take it
-from there.
+issue. Report them privately with GitHub's
+[Report a vulnerability](https://github.com/ShaKy8/clipnet/security/advisories/new)
+form, on the repository's **Security** tab. Only the maintainers see the report.
 
 ## Building and testing
 
