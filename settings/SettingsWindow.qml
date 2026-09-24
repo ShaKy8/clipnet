@@ -11,7 +11,31 @@ FloatingWindow {
   id: win
 
   property int page: 0
-  readonly property var pages: ["General", "Capture", "History", "Paste", "Hotkeys", "Data"]
+  readonly property var pages: ["General", "Capture", "History", "Paste", "Buffers", "Rules", "Hotkeys", "Data"]
+  property var hotkeyList: []
+  property var groupList: []
+  property var ruleList: []
+  property var bufferList: []
+
+  function loadHotkeys() { Daemon.call("hotkeys.list", {}, r => { if (r) hotkeyList = r }) }
+  function loadGroups() { Daemon.call("groups.list", {}, r => { if (r) groupList = r }) }
+  function loadRules() { Daemon.call("rules.list", {}, r => { if (r) ruleList = r }) }
+  function loadBuffers() { Daemon.call("buffers.get", {}, r => { if (r) bufferList = r }) }
+  function groupName(uuid) {
+    const g = groupList.find(x => x.uuid === uuid)
+    return g ? g.name : "(deleted group)"
+  }
+
+  Connections {
+    target: Daemon
+    function onEvent(name, data) {
+      if (!win.visible) return
+      if (name === "hotkeys.changed") win.loadHotkeys()
+      else if (name === "groups.changed") win.loadGroups()
+      else if (name === "rules.changed") win.loadRules()
+      else if (name === "buffers.changed" || name.startsWith("clip")) win.loadBuffers()
+    }
+  }
 
   title: "CLIP//NET settings"
   color: Theme.card
@@ -25,7 +49,7 @@ FloatingWindow {
     nav.forceActiveFocus()
   }
 
-  onVisibleChanged: if (visible) { stats.load(); hotkeys.load() }
+  onVisibleChanged: if (visible) { stats.load(); hotkeys.load(); loadHotkeys(); loadGroups(); loadRules(); loadBuffers() }
 
   // ---- navigation -----------------------------------------------------------
 
@@ -94,7 +118,7 @@ FloatingWindow {
     Item {
       id: content
       width: flick.width
-      height: [general, capture, history, paste, hotkeysPage, data][win.page].height
+      height: [general, capture, history, paste, buffersPage, rulesPage, hotkeysPage, data][win.page].height
 
       // ---- General ----------------------------------------------------------
       Column {
@@ -157,6 +181,12 @@ FloatingWindow {
             hint: "Never after a password manager clears it on purpose."
           }
           SettingToggle { key: "store_source_title"; text: "Remember the window title a clip was copied from" }
+          SettingToggle {
+            key: "capture_primary"
+            text: "Also record selected text (select-to-copy)"
+            hint: "Linux's second clipboard: whatever you highlight. Off by default, since every selection would land in the history. Saved once the selection has held still for a moment."
+          }
+          HotkeyBinder { label: "Hotkey to pause / resume recording"; action: "pause_toggle"; hotkeys: win.hotkeyList; onChanged: win.loadHotkeys() }
         }
         Section {
           title: "Size limits per format"
@@ -233,10 +263,183 @@ FloatingWindow {
         }
       }
 
+      // ---- Copy buffers -----------------------------------------------------
+      Column {
+        id: buffersPage
+        visible: win.page === 4
+        width: parent.width
+        spacing: Theme.px(22)
+        Text {
+          width: parent.width
+          wrapMode: Text.Wrap
+          text: "Three extra clipboards, as in Ditto. \u201cCopy into buffer\u201d copies the selection in the focused window into the buffer and leaves your normal clipboard as it was; \u201cpaste buffer\u201d pastes it and puts the normal clipboard back. Give them hotkeys here."
+          color: Theme.dim
+          font.family: Theme.fontFamily
+          font.pixelSize: Theme.fontSize - 1
+        }
+        Repeater {
+          model: 3
+          Section {
+            required property int index
+            readonly property int slot: index + 1
+            readonly property var held: (win.bufferList.find(b => b.slot === slot) || {}).clip || null
+            title: "Buffer " + slot
+            Text {
+              width: parent.width
+              elide: Text.ElideRight
+              text: held ? "Holds: " + (held.title || held.preview) : "Empty"
+              color: held ? Theme.text : Theme.dim
+              font.family: Theme.fontFamily
+              font.pixelSize: Theme.fontSize
+            }
+            Row {
+              width: parent.width
+              spacing: Theme.px(10)
+              HotkeyBinder { width: (parent.width - Theme.px(20)) / 3; label: "Copy into it"; action: "buffer_copy"; arg: String(slot); hotkeys: win.hotkeyList; onChanged: win.loadHotkeys() }
+              HotkeyBinder { width: (parent.width - Theme.px(20)) / 3; label: "Cut into it"; action: "buffer_cut"; arg: String(slot); hotkeys: win.hotkeyList; onChanged: win.loadHotkeys() }
+              HotkeyBinder { width: (parent.width - Theme.px(20)) / 3; label: "Paste it"; action: "buffer_paste"; arg: String(slot); hotkeys: win.hotkeyList; onChanged: win.loadHotkeys() }
+            }
+          }
+        }
+      }
+
+      // ---- Rules --------------------------------------------------------------
+      Column {
+        id: rulesPage
+        visible: win.page === 5
+        width: parent.width
+        spacing: Theme.px(22)
+
+        function describe(r) {
+          const app = r.match_app ? "\u201c" + r.match_app + "\u201d" : "any app"
+          switch (r.action) {
+          case "exclude": return "Ignore copies from " + app
+          case "skip_mime": return "Drop " + r.match_mime + " from copies" + (r.match_app ? " made in " + app : "")
+          case "paste_keys": return "Paste with " + KeyNames.pretty(r.arg ? r.arg.keys : "?") + " in " + app
+          case "to_group": return "File copies from " + app + " in \u201c" + win.groupName(r.arg ? r.arg.group : "") + "\u201d"
+          }
+          return r.action
+        }
+
+        Section {
+          title: "Rules"
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Apps are matched by their window class, with * as a wildcard and case ignored (see classes with: hyprctl clients). Rules apply top to bottom."
+            color: Theme.dim
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSize - 1
+          }
+          Repeater {
+            model: win.ruleList
+            Row {
+              required property var modelData
+              required property int index
+              width: parent.width
+              spacing: Theme.px(8)
+              Toggle {
+                width: parent.width - Theme.px(200)
+                text: rulesPage.describe(modelData)
+                checked: modelData.enabled
+                onToggled: c => {
+                  const spec = { id: modelData.id, enabled: c, action: modelData.action,
+                                 match_app: modelData.match_app, match_mime: modelData.match_mime, arg: modelData.arg }
+                  Daemon.call("rules.set", spec, (r, err) => { if (err) console.warn("clipnet:", err.message) })
+                }
+              }
+              Btn {
+                text: "\u2191"
+                implicitWidth: Theme.px(34)
+                enabled: index > 0
+                opacity: enabled ? 1 : 0.3
+                onClicked: {
+                  const ids = win.ruleList.map(x => x.id)
+                  ids.splice(index - 1, 2, ids[index], ids[index - 1])
+                  Daemon.call("rules.reorder", { ids: ids })
+                }
+              }
+              Btn {
+                text: "\u2193"
+                implicitWidth: Theme.px(34)
+                enabled: index < win.ruleList.length - 1
+                opacity: enabled ? 1 : 0.3
+                onClicked: {
+                  const ids = win.ruleList.map(x => x.id)
+                  ids.splice(index, 2, ids[index + 1], ids[index])
+                  Daemon.call("rules.reorder", { ids: ids })
+                }
+              }
+              Btn { text: "Delete"; danger: true; onClicked: Daemon.call("rules.delete", { id: modelData.id }) }
+            }
+          }
+        }
+
+        Section {
+          id: newRule
+          title: "Add a rule"
+          property string action: "exclude"
+          property string groupUuid: ""
+          property string error: ""
+          Flow {
+            width: parent.width
+            spacing: Theme.px(4)
+            Repeater {
+              model: [{ v: "exclude", l: "Ignore an app" }, { v: "skip_mime", l: "Drop a format" },
+                      { v: "paste_keys", l: "Paste key for an app" }, { v: "to_group", l: "File an app's copies" }]
+              Btn {
+                required property var modelData
+                text: modelData.l
+                primary: newRule.action === modelData.v
+                onClicked: newRule.action = modelData.v
+              }
+            }
+          }
+          Field { id: ruleApp; width: parent.width; label: newRule.action === "skip_mime" ? "App (optional)" : "App"; placeholder: "e.g. *slack* or com.mitchellh.ghostty" }
+          Field { id: ruleMime; visible: newRule.action === "skip_mime"; width: parent.width; label: "Format"; placeholder: "e.g. image/* or text/html" }
+          HotkeyField { id: ruleKeys; visible: newRule.action === "paste_keys"; width: Theme.px(260); label: "Keys that paste in that app" }
+          Btn {
+            visible: newRule.action === "to_group"
+            text: newRule.groupUuid ? "Group: " + win.groupName(newRule.groupUuid) : "Choose a group\u2026"
+            onClicked: {
+              if (!win.groupList.length) { newRule.error = "Make a group first (F7 in the popup)."; return }
+              const items = win.groupList.map(g => ({ label: g.name, action: "g", data: g.uuid }))
+              const m = menuComp.createObject(content, { items: items, px: Theme.px(40), py: Theme.px(40) })
+              m.triggered.connect((a, d) => { newRule.groupUuid = d; m.destroy() })
+              m.closed.connect(() => m.destroy())
+              m.focusMenu()
+            }
+          }
+          Btn {
+            text: "Add rule"
+            primary: true
+            onClicked: {
+              const spec = { action: newRule.action, match_app: ruleApp.text, match_mime: ruleMime.text }
+              if (newRule.action === "paste_keys") spec.arg = { keys: ruleKeys.accel }
+              if (newRule.action === "to_group") spec.arg = { group: newRule.groupUuid }
+              Daemon.call("rules.set", spec, (r, err) => {
+                newRule.error = err ? err.message : ""
+                if (!err) { ruleApp.text = ""; ruleMime.text = ""; ruleKeys.accel = "" }
+              })
+            }
+          }
+          Text {
+            visible: !!newRule.error
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: newRule.error
+            color: Theme.urgent
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSize - 1
+          }
+        }
+        Component { id: menuComp; Menu {} }
+      }
+
       // ---- Hotkeys ----------------------------------------------------------
       Column {
         id: hotkeysPage
-        visible: win.page === 4
+        visible: win.page === 6
         width: parent.width
         spacing: Theme.px(22)
         Section {
@@ -313,7 +516,7 @@ FloatingWindow {
       // ---- Data -------------------------------------------------------------
       Column {
         id: data
-        visible: win.page === 5
+        visible: win.page === 7
         width: parent.width
         spacing: Theme.px(22)
         Section {

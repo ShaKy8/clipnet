@@ -26,6 +26,7 @@
 #include <unistd.h>
 
 #include "app.h"
+#include "buffers.h"
 #include "capture.h"
 #include "ctl.h"
 #include "db.h"
@@ -188,6 +189,7 @@ int main(int argc, char **argv)
   }
   app.ipc = ipc_listen(&app, socket_path);
   if (!app.ipc) return 1;
+  app.buffers = buffers_new(&app);
   app.hotkeys = hotkeys_new(&app);
   if (app.hypr) hypr_on_reload(app.hypr, on_hypr_reload, app.hotkeys);
   hotkeys_prune(app.hotkeys);
@@ -209,6 +211,7 @@ int main(int argc, char **argv)
   ipc_close(app.ipc);
   app.ipc = NULL;
   hotkeys_free(app.hotkeys);
+  buffers_free(app.buffers);
   capture_free(app.capture);
   serve_free(app.serve);
   hypr_disconnect(app.hypr);

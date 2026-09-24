@@ -147,14 +147,49 @@ check "custom format offered back" test "$(wl-paste -n -t application/x-clipnet-
 wait "$opid" || true
 before=$((before + 1))
 
+echo "live: rules drop formats and route clips"
+g=$(ctl '{"op":"groups.create","name":"Routed"}' | jq .id)
+guuid=$(ctl '{"op":"groups.list"}' | jq -r ".[] | select(.id==$g) | .uuid")
+r1=$(ctl '{"op":"rules.set","action":"skip_mime","match_mime":"application/x-clipnet-test"}' | jq .id)
+r2=$(ctl "{\"op\":\"rules.set\",\"action\":\"to_group\",\"match_app\":\"*\",\"arg\":{\"group\":\"$guuid\"}}" | jq .id)
+printf 'ruled-bytes' | "$OFFER" --timeout 1500 'text/plain;charset=utf-8' application/x-clipnet-test &
+opid=$!
+check "ruled copy is captured" wait_count $((before + 1))
+wait "$opid" || true
+before=$((before + 1))
+rrow=$(ctl '{"op":"list","limit":1}' | jq '.rows[0]')
+if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  check "skip_mime dropped the format" bash -c "! jq -e '.mimes | index(\"application/x-clipnet-test\")' <<<'$rrow' >/dev/null"
+  check "to_group routed the clip" test "$(jq .group_id <<<"$rrow")" = "$g"
+fi
+ctl "{\"op\":\"rules.delete\",\"id\":$r1}" >/dev/null
+ctl "{\"op\":\"rules.delete\",\"id\":$r2}" >/dev/null
+
+echo "live: PRIMARY (select-to-copy) is ignored unless enabled"
+printf 'selected text one' | "$OFFER" --timeout 1500 --primary 'text/plain;charset=utf-8' &
+opid=$!
+sleep 1
+check "PRIMARY ignored by default" wait_count "$before"
+wait "$opid" || true
+ctl '{"op":"settings.set","key":"capture_primary","value":true}' >/dev/null
+printf 'selected text two' | "$OFFER" --timeout 2500 --primary 'text/plain;charset=utf-8' &
+opid=$!
+sleep 1.2
+check "PRIMARY captured when enabled" wait_count $((before + 1))
+check "PRIMARY clip holds the text" test "$(ctl '{"op":"list","limit":1}' | jq -r '.rows[0].preview')" = "selected text two"
+wait "$opid" || true
+ctl '{"op":"settings.set","key":"capture_primary","value":false}' >/dev/null
+before=$((before + 1))
+
 echo "live: keep-alive never touches a clipboard someone else owns"
 printf 'still owned' | wlcopy
 wait_count $((before + 1)) || true
 before=$((before + 1))
+restores=$(grep -c 'restoring clip' "$WORK/log" || true)
 ctl '{"op":"show_context"}' >/dev/null
 sleep 0.4
 check "an owned clipboard is left alone" test "$(wl-paste -n 2>/dev/null)" = "still owned"
-check "no restore was attempted" bash -c "! grep -q 'restoring clip' '$WORK/log'"
+check "no restore was attempted" test "$(grep -c 'restoring clip' "$WORK/log" || true)" = "$restores"
 
 echo "live: keep-alive after the owner exits"
 printf 'owner goes away' | wl-copy --foreground >/dev/null 2>&1 &

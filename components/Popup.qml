@@ -717,7 +717,8 @@ PanelWindow {
         spacing: Theme.px(6)
         Text {
           visible: Daemon.paused
-          text: " PAUSED"
+          text: Daemon.pausedUntil > 0 ? " PAUSED " + Math.max(1, Math.ceil((Daemon.pausedUntil - ticker.now) / 60000)) + " min"
+                                       : " PAUSED"
           color: Theme.urgent
           font.family: Theme.fontFamily
           font.pixelSize: Theme.fontSize - 2

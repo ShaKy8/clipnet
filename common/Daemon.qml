@@ -18,6 +18,7 @@ Singleton {
   readonly property bool online: sock.connected && ready
   property bool ready: false
   property bool paused: false
+  property real pausedUntil: 0   // ms; 0 = until resumed
   property bool hyprland: false
   property string version: ""
   // The daemon's settings, kept current through settings.changed events.
@@ -50,7 +51,7 @@ Singleton {
     let msg
     try { msg = JSON.parse(line) } catch (e) { console.warn("clipnet: bad line from daemon"); return }
     if (msg.event !== undefined) {
-      if (msg.event === "state.changed") paused = !!msg.data.paused
+      if (msg.event === "state.changed") { paused = !!msg.data.paused; pausedUntil = msg.data.paused_until || 0 }
       if (msg.event === "settings.changed") {
         const next = Object.assign({}, settings)
         next[msg.data.key] = msg.data.value
@@ -82,6 +83,7 @@ Singleton {
           if (!r) return
           root.version = r.version
           root.paused = r.paused
+          root.call("state.get", {}, st => { if (st) root.pausedUntil = st.paused_until || 0 })
           root.hyprland = r.hyprland
           root.ready = true
           root.call("settings.get", {}, s => { if (s) root.settings = s })

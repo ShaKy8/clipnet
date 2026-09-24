@@ -41,6 +41,20 @@ can also bind history positions, e.g. Ctrl+Alt+1 for "the newest clip".
 Hotkeys that clash with an existing Hyprland binding are refused, and the
 message says what already owns them.
 
+## Beyond the popup
+
+- **Copy buffers** (Settings → Buffers): three extra clipboards, as in Ditto.
+  Give each a *copy into*, *cut into* and *paste* hotkey. Copying into a
+  buffer, or pasting from one, leaves your normal clipboard as it was.
+- **Rules** (Settings → Rules): ignore an app entirely, drop a format
+  (say `image/*` from a browser), paste with a different key in an app (for
+  example Ctrl+Shift+V in a terminal that lacks Omarchy's Shift+Insert
+  mapping), or file an app's copies straight into a group.
+- **Pause** recording for 15 minutes, an hour or four (Settings → Capture,
+  `clipnet pause 60`, or a hotkey). The popup shows the time left.
+- **Select-to-copy** (Linux's PRIMARY selection) can be recorded too. It's
+  off by default, because every highlight would otherwise land in the history.
+
 ## How it works
 
 ```

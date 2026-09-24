@@ -3,11 +3,12 @@
  * command line (wl-copy offers one type per call), until another client
  * takes the clipboard or `timeout` expires.
  *
- *   offer [--timeout MS] TYPE... < payload
+ *   offer [--timeout MS] [--primary] TYPE... < payload
  */
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +51,12 @@ static const struct wl_registry_listener reg_l = { global, global_remove };
 int main(int argc, char **argv)
 {
   int timeout = 5000, i = 1;
-  if (argc > 2 && !strcmp(argv[1], "--timeout")) { timeout = atoi(argv[2]); i = 3; }
+  bool primary = false;
+  for (;;) {
+    if (i + 1 < argc && !strcmp(argv[i], "--timeout")) { timeout = atoi(argv[i + 1]); i += 2; }
+    else if (i < argc && !strcmp(argv[i], "--primary")) { primary = true; i++; }
+    else break;
+  }
   if (i >= argc) { fprintf(stderr, "usage: offer [--timeout MS] TYPE... < payload\n"); return 2; }
   size_t cap = 0;
   for (;;) {
@@ -68,7 +74,8 @@ int main(int argc, char **argv)
   struct ext_data_control_source_v1 *src = ext_data_control_manager_v1_create_data_source(mgr);
   for (; i < argc; i++) ext_data_control_source_v1_offer(src, argv[i]);
   ext_data_control_source_v1_add_listener(src, &src_l, NULL);
-  ext_data_control_device_v1_set_selection(dev, src);
+  if (primary) ext_data_control_device_v1_set_primary_selection(dev, src);
+  else ext_data_control_device_v1_set_selection(dev, src);
   wl_display_flush(dpy);
   struct pollfd p = { wl_display_get_fd(dpy), POLLIN, 0 };
   while (!done) {

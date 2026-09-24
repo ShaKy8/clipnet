@@ -152,6 +152,35 @@ def main():
         c.s.sendall(b"not json\n")
         check("garbage line gets an error", c._line()["error"]["code"] == "bad_request")
 
+        # Rules (Phase 3)
+        seeded = c.ok("rules.list")
+        check("password managers excluded by default", any(r["match_app"] == "*keepassxc*" for r in seeded))
+        r1 = c.ok("rules.set", action="exclude", match_app="*slack*")["id"]
+        bad = c.call("rules.set", action="paste_keys", match_app="*kitty*", arg={"keys": "Ctrl+Nope"})
+        check("bad paste keys refused", not bad["ok"])
+        r2 = c.ok("rules.set", action="paste_keys", match_app="*kitty*", arg={"keys": "shift+ctrl+v"})["id"]
+        rules = {r["id"]: r for r in c.ok("rules.list")}
+        check("paste keys stored canonically", rules[r2]["arg"]["keys"] == "Ctrl+Shift+V")
+        c.ok("rules.set", id=r1, action="exclude", match_app="*slack*", enabled=False)
+        check("rule disabled", not {r["id"]: r for r in c.ok("rules.list")}[r1]["enabled"])
+        c.ok("rules.reorder", ids=[r2, r1])
+        check("reordered", [r["id"] for r in c.ok("rules.list")][:2] == [r2, r1])
+        c.ok("rules.delete", id=r1)
+        check("rule deleted twice fails", not c.call("rules.delete", id=r1)["ok"])
+
+        # Copy buffers (need a compositor to act; state works without one)
+        bufs = c.ok("buffers.get")
+        check("three empty buffers", [b["slot"] for b in bufs] == [1, 2, 3] and all(b["clip"] is None for b in bufs))
+        check("paste from an empty buffer fails", not c.call("buffer.paste", slot=2)["ok"])
+        check("buffer 4 does not exist", not c.call("buffer.copy", slot=4)["ok"])
+        hk = c.ok("hotkeys.set", accel="Ctrl+Alt+F9", action="buffer_paste", arg="2")["id"]
+        check("buffer hotkey refuses slot 5", not c.call("hotkeys.set", accel="Ctrl+Alt+F10", action="buffer_copy", arg="5")["ok"])
+        pt = c.ok("hotkeys.set", accel="Ctrl+Alt+F8", action="pause_toggle")["id"]
+        labels = {h["id"]: h["label"] for h in c.ok("hotkeys.list")}
+        check("hotkey labels", labels.get(hk) == "paste buffer 2" and labels.get(pt) == "pause or resume recording")
+        c.ok("hotkeys.remove", id=hk)
+        c.ok("hotkeys.remove", id=pt)
+
         deleted = c.ok("delete", ids=[ids[3]])
         check("delete", deleted["deleted"] == 1)
 

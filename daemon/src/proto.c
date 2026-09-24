@@ -6,6 +6,7 @@
 
 #include "app.h"
 #include "cJSON.h"
+#include "buffers.h"
 #include "capture.h"
 #include "db.h"
 #include "export.h"
@@ -15,6 +16,7 @@
 #include "ipc.h"
 #include "mime.h"
 #include "paste.h"
+#include "rules.h"
 #include "serve.h"
 #include "settings.h"
 #include "transform.h"
@@ -443,6 +445,74 @@ static void op_hotkeys_remove(struct call *k)
   ok(k, NULL);
 }
 
+/* ---- copy buffers (Phase 3) ------------------------------------------ */
+
+static void op_buffers_get(struct call *k)
+{
+  ok(k, buffers_state(k->app->buffers));
+}
+
+static void op_buffer_copy(struct call *k)
+{
+  int64_t slot;
+  if (!arg_int(k, "slot", 0, &slot)) return;
+  const char *err = NULL;
+  if (buffers_copy(k->app->buffers, (int)slot, cJSON_IsTrue(arg(k, "cut")), &err) < 0) { fail(k, "bad_value", err); return; }
+  ok(k, NULL);
+}
+
+static void op_buffer_paste(struct call *k)
+{
+  int64_t slot;
+  if (!arg_int(k, "slot", 0, &slot)) return;
+  const char *err = NULL;
+  if (buffers_paste(k->app->buffers, (int)slot, &err) < 0) { fail(k, "paste_failed", err); return; }
+  ok(k, NULL);
+}
+
+/* ---- rules (Phase 3) ------------------------------------------------- */
+
+static void op_rules_list(struct call *k)
+{
+  ok(k, rules_list(k->app->db));
+}
+
+static void op_rules_set(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  int64_t rid = rules_set(k->app->db, id, k->req, &err);
+  if (rid < 0) { fail(k, "bad_value", err); return; }
+  app_emit(k->app, "rules.changed", NULL);
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddNumberToObject(r, "id", (double)rid);
+  ok(k, r);
+}
+
+static void op_rules_delete(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  if (rules_delete(k->app->db, id, &err) < 0) { fail(k, "not_found", err); return; }
+  app_emit(k->app, "rules.changed", NULL);
+  ok(k, NULL);
+}
+
+static void op_rules_reorder(struct call *k)
+{
+  int64_t *ids;
+  size_t n = arg_ids(k, &ids);
+  if (!n) return;
+  const char *err = NULL;
+  int rc = rules_reorder(k->app->db, ids, n, &err);
+  free(ids);
+  if (rc < 0) { fail(k, "db_error", err); return; }
+  app_emit(k->app, "rules.changed", NULL);
+  ok(k, NULL);
+}
+
 static void op_transforms(struct call *k)
 {
   size_t n;
@@ -618,6 +688,13 @@ static const struct {
   { "hotkeys.remove", op_hotkeys_remove },
   { "transforms.list", op_transforms },
   { "export", op_export },
+  { "buffers.get", op_buffers_get },
+  { "buffer.copy", op_buffer_copy },
+  { "buffer.paste", op_buffer_paste },
+  { "rules.list", op_rules_list },
+  { "rules.set", op_rules_set },
+  { "rules.delete", op_rules_delete },
+  { "rules.reorder", op_rules_reorder },
 };
 
 void proto_handle(struct app *app, struct ipc_client *c, const cJSON *req)

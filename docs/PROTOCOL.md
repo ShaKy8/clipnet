@@ -83,16 +83,32 @@ Returned by `list`, `get`, and the `clip.added` / `clip.updated` events:
 | `groups.move` | `id`, `parent` | null (a group cannot go inside itself) |
 | `groups.delete` | `id`, `cascade` | `{released_clips}` or `{deleted_clips}`; subgroups go too |
 | `hotkeys.list` | | `[{id, accel, action, arg, enabled, label, conflict}]` |
-| `hotkeys.set` | `id` (0 = new), `accel` (`"Ctrl+Alt+1"`), `action` (`paste_clip` + uuid, or `paste_position` + `"N"`) | `{id}`; `bad_value` names the bind already on those keys |
+| `hotkeys.set` | `id` (0 = new), `accel` (`"Ctrl+Alt+1"`), `action`, `arg` | `{id}`; `bad_value` names the bind already on those keys |
 | `hotkeys.remove` | `id` | null |
 | `transforms.list` | | `[{id, label}]`: the Special Paste transforms |
 | `export` | `path` (absolute), `group` (0 = all) | `{clips, groups, path}` |
+| `buffers.get` | | `[{slot, clip: row \| null}]` for slots 1–3 |
+| `buffer.copy` | `slot`, `cut` | null. Presses Ctrl+C/X in the focused window, keeps the result in the slot, restores the clipboard |
+| `buffer.paste` | `slot` | null. Pastes the slot, then restores the clipboard once the app has read it |
+| `rules.list` | | `[{id, enabled, action, match_app, match_mime, arg}]` in order |
+| `rules.set` | `id` (0 = new), `action`, `match_app`, `match_mime`, `arg`, `enabled` | `{id}` |
+| `rules.delete` | `id` | null |
+| `rules.reorder` | `ids` | null. The named rules go first, the rest keep their order |
 
 When `paste` or `copy` gets several ids, the clips' text is joined with
 `separator` (default: the `multi_separator` setting) and pasted as a single
 text clip. `transform` (an id from `transforms.list`) applies Special Paste to
 that text first; `text` replaces the content outright. Both still credit the
 ids (move to top, paste count). Neither stores a new clip.
+
+Hotkey actions: `paste_clip` (arg: clip uuid), `paste_position` (arg `"N"`),
+`buffer_copy`, `buffer_cut` and `buffer_paste` (arg `"1"`–`"3"`), and
+`pause_toggle` (no arg).
+
+Rule actions: `exclude` (match_app), `skip_mime` (match_mime, optional
+match_app), `paste_keys` (match_app, arg `{"keys": "Ctrl+Shift+V"}`), and
+`to_group` (match_app, arg `{"group": uuid}`). Patterns are case-insensitive
+globs; apps are Hyprland window classes.
 
 Hotkeys are stored in the portable spelling (`Ctrl+Alt+1`, `Super+Apostrophe`)
 and bound in Hyprland as global shortcuts `clipnetd:h<id>`. Bind descriptions
@@ -101,7 +117,7 @@ never include clip text, only a title the user set or the clip's number.
 ## Events
 
 `clip.added`, `clip.updated` (a row), `clip.deleted` (`{id}`), `groups.changed`,
-`hotkeys.changed`, `clips.reset`
+`hotkeys.changed`, `rules.changed`, `buffers.changed` (`{slot}`), `clips.reset`
 (reload everything: after an import or retention), `state.changed`
 (`{paused, paused_until}`), `settings.changed` (`{key, value}`).
 

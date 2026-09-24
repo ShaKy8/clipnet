@@ -1,6 +1,7 @@
 #include "wl.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/epoll.h>
@@ -235,27 +236,42 @@ void wl_disconnect(struct wl *wl)
   free(wl);
 }
 
-/* A probe: a throwaway device whose initial events describe the clipboard as
- * it is now. Offers are kept (not destroyed on arrival: libwayland hands a
- * destroyed object to the following selection event as NULL, which would
- * read as "empty"), and a sync round trip marks the end of the initial
- * burst, after which the answer is known and everything is torn down. */
+/* A probe answers "is anything on the clipboard right now?" on its own,
+ * short-lived Wayland connection. Every new data-control device receives the
+ * current selection, so one device and a sync round trip give the answer.
+ *
+ * Not on the main connection: destroying a device there races with offers
+ * the compositor is already sending it, and libwayland drops events for a
+ * destroyed object *including the objects they create*, which desynchronises
+ * the id map and kills the connection ("not a valid new object id").
+ * Closing a whole connection has no such race. */
 struct probe {
-  struct wl *wl;
-  struct ext_data_control_device_v1 *device;
-  struct wl_callback *sync;
-  struct ext_data_control_offer_v1 **offers;
+  struct wl_seat *seat;
+  struct ext_data_control_manager_v1 *manager;
+  struct ext_data_control_offer_v1 *offers[8]; /* freed before disconnecting */
   size_t n_offers;
   bool has_selection;
-  wl_probe_cb cb;
-  void *ctx;
+};
+
+static void probe_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
+{
+  struct probe *p = data;
+  if (!strcmp(iface, wl_seat_interface.name) && !p->seat)
+    p->seat = wl_registry_bind(reg, name, &wl_seat_interface, 1);
+  else if (!strcmp(iface, ext_data_control_manager_v1_interface.name) && !p->manager)
+    p->manager = wl_registry_bind(reg, name, &ext_data_control_manager_v1_interface, 1);
+}
+
+static const struct wl_registry_listener probe_registry_listener = {
+  .global = probe_global,
+  .global_remove = registry_global_remove,
 };
 
 static void probe_data_offer(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o)
 {
   struct probe *p = data;
-  p->offers = xrealloc(p->offers, (p->n_offers + 1) * sizeof *p->offers);
-  p->offers[p->n_offers++] = o;
+  if (p->n_offers < ARRAY_LEN(p->offers)) p->offers[p->n_offers++] = o;
+  else ext_data_control_offer_v1_destroy(o); /* safe: offers never create objects */
 }
 
 static void probe_selection(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o)
@@ -265,11 +281,7 @@ static void probe_selection(void *data, struct ext_data_control_device_v1 *dev, 
 }
 
 static void probe_primary(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {}
-
-static void probe_finished(void *data, struct ext_data_control_device_v1 *dev)
-{
-  /* The seat went away; the sync callback still completes the probe. */
-}
+static void probe_finished(void *data, struct ext_data_control_device_v1 *dev) {}
 
 static const struct ext_data_control_device_v1_listener probe_listener = {
   .data_offer = probe_data_offer,
@@ -280,33 +292,55 @@ static const struct ext_data_control_device_v1_listener probe_listener = {
 
 static void probe_done(void *data, struct wl_callback *cb, uint32_t serial)
 {
-  struct probe *p = data;
-  for (size_t i = 0; i < p->n_offers; i++) ext_data_control_offer_v1_destroy(p->offers[i]);
-  free(p->offers);
-  ext_data_control_device_v1_destroy(p->device);
-  wl_callback_destroy(p->sync);
-  wl_probe_cb done = p->cb;
-  void *ctx = p->ctx;
-  bool has = p->has_selection;
-  free(p);
-  done(ctx, has);
+  *(bool *)data = true;
 }
 
 static const struct wl_callback_listener probe_sync_listener = { .done = probe_done };
 
+/* wl_display_roundtrip with a deadline. */
+static bool roundtrip_by(struct wl_display *d, int64_t deadline)
+{
+  bool done = false;
+  struct wl_callback *cb = wl_display_sync(d);
+  wl_callback_add_listener(cb, &probe_sync_listener, &done);
+  while (!done) {
+    while (wl_display_prepare_read(d) != 0) wl_display_dispatch_pending(d);
+    if (wl_display_flush(d) < 0 && errno != EAGAIN) { wl_display_cancel_read(d); break; }
+    int64_t left = deadline - mono_ms();
+    struct pollfd pfd = { .fd = wl_display_get_fd(d), .events = POLLIN };
+    if (left <= 0 || poll(&pfd, 1, (int)left) <= 0) { wl_display_cancel_read(d); break; }
+    if (wl_display_read_events(d) < 0) break;
+    wl_display_dispatch_pending(d);
+  }
+  wl_callback_destroy(cb);
+  return done;
+}
+
 void wl_probe_selection(struct wl *wl, wl_probe_cb cb, void *ctx)
 {
-  struct probe *p = xcalloc(1, sizeof *p);
-  p->wl = wl;
-  p->cb = cb;
-  p->ctx = ctx;
-  p->device = ext_data_control_manager_v1_get_data_device(wl->manager, wl->seat);
-  ext_data_control_device_v1_add_listener(p->device, &probe_listener, p);
-  /* Requests are handled in order, so the device's initial events are all
-   * sent before this callback fires. */
-  p->sync = wl_display_sync(wl->display);
-  wl_callback_add_listener(p->sync, &probe_sync_listener, p);
-  wl_flush(wl);
+  /* Unknown means "occupied": never overwrite a clipboard on a guess. */
+  bool has = true;
+  struct wl_display *d = wl_display_connect(NULL);
+  if (d) {
+    int64_t deadline = mono_ms() + 250;
+    struct probe p = { 0 };
+    struct wl_registry *reg = wl_display_get_registry(d);
+    wl_registry_add_listener(reg, &probe_registry_listener, &p);
+    struct ext_data_control_device_v1 *dev = NULL;
+    if (roundtrip_by(d, deadline) && p.seat && p.manager) {
+      dev = ext_data_control_manager_v1_get_data_device(p.manager, p.seat);
+      ext_data_control_device_v1_add_listener(dev, &probe_listener, &p);
+      if (roundtrip_by(d, deadline)) has = p.has_selection;
+    }
+    /* Everything goes with the connection; nothing more is read from it. */
+    for (size_t i = 0; i < p.n_offers; i++) ext_data_control_offer_v1_destroy(p.offers[i]);
+    if (dev) ext_data_control_device_v1_destroy(dev);
+    if (p.manager) ext_data_control_manager_v1_destroy(p.manager);
+    if (p.seat) wl_seat_destroy(p.seat);
+    wl_registry_destroy(reg);
+    wl_display_disconnect(d);
+  }
+  cb(ctx, has);
 }
 
 void wl_offer_receive(struct wl *wl, struct wl_offer *o, const char *mime, int fd)

@@ -29,6 +29,12 @@ int serve_clip(struct serve *s, int64_t id, enum serve_mode mode);
 /* Own the clipboard with arbitrary text (a transform, a multi-clip join).
  * clip_id, when nonzero, is reported as the current clip. */
 int serve_text(struct serve *s, const char *text, size_t len, int64_t clip_id);
+/* Call cb once, the first time a reader asks the current source for real
+ * content (not our marker). Replaced by the next call; dropped when the
+ * source is replaced. */
+typedef void (*serve_read_cb)(void *ctx);
+void serve_on_first_read(struct serve *s, serve_read_cb cb, void *ctx);
+
 /* The id of the clip we are serving, or 0. */
 int64_t serve_current(struct serve *s);
 /* Number of payload transfers still being written. */

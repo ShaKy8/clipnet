@@ -55,6 +55,14 @@ struct capture {
   struct loop_timer *debounce_timer, *format_timer, *keepalive_timer, *recheck_timer;
   bool probing;
 
+  /* PRIMARY selection, read separately (text only). */
+  struct wl_offer *primary_offer;
+  char *primary_app;
+  int primary_fd;
+  struct loop_watch *primary_watch;
+  struct buf primary_buf;
+  struct loop_timer *primary_timer;
+
   int64_t current_clip;
   bool sensitive;
 
@@ -68,6 +76,7 @@ struct capture *capture_new(struct app *app)
   struct capture *c = xcalloc(1, sizeof *c);
   c->app = app;
   c->fd = -1;
+  c->primary_fd = -1;
   return c;
 }
 
@@ -97,10 +106,13 @@ static void abort_current(struct capture *c)
   c->offer = NULL;
 }
 
+static void primary_stop(struct capture *c);
+
 void capture_free(struct capture *c)
 {
   if (!c) return;
   abort_current(c);
+  primary_stop(c);
   loop_timer_cancel(c->app->loop, c->keepalive_timer);
   loop_timer_cancel(c->app->loop, c->recheck_timer);
   free(c);
@@ -160,12 +172,14 @@ static void finish(struct capture *c)
   if (!any_bytes) {
     log_debug("selection had no content; not stored");
   } else {
+    int64_t route = rules_route_group(app->db, c->source_app);
     bool keep_title = setting_bool(app->db, "store_source_title");
     struct clip_in in = {
       .fmts = fmts,
       .n_fmts = n,
       .source_app = c->source_app,
       .source_title = keep_title ? c->source_title : NULL,
+      .group_id = route,
     };
     int64_t id = 0;
     enum add_result r = db_add_clip(app->db, &in, &id);
@@ -360,6 +374,7 @@ void capture_on_selection(struct capture *c, struct wl_offer *offer)
     wl_offer_destroy(offer);
     return;
   }
+  rules_filter_plan(app->db, app_class, &c->plan);
   if (!c->plan.n_reads) {
     wl_offer_destroy(offer);
     return;
@@ -371,8 +386,101 @@ void capture_on_selection(struct capture *c, struct wl_offer *offer)
   c->debounce_timer = loop_timer(app->loop, DEBOUNCE_MS, on_debounced, c);
 }
 
+/* ---- PRIMARY (select-to-copy) ------------------------------------------
+ *
+ * Optional and off by default: every text selection would otherwise land in
+ * the history. Text only, and only once the selection has held still for a
+ * moment, since it changes continuously while the mouse drags. */
+
+#define PRIMARY_SETTLE_MS 700
+#define PRIMARY_CAP (1024 * 1024)
+
+static void primary_stop(struct capture *c)
+{
+  loop_timer_cancel(c->app->loop, c->primary_timer);
+  c->primary_timer = NULL;
+  if (c->primary_watch) loop_del_fd(c->app->loop, c->primary_watch);
+  c->primary_watch = NULL;
+  if (c->primary_fd >= 0) close(c->primary_fd);
+  c->primary_fd = -1;
+  buf_free(&c->primary_buf);
+  wl_offer_destroy(c->primary_offer);
+  c->primary_offer = NULL;
+  free(c->primary_app);
+  c->primary_app = NULL;
+}
+
+static void primary_store(struct capture *c)
+{
+  struct app *app = c->app;
+  const char *t = c->primary_buf.data ? (const char *)c->primary_buf.data : "";
+  size_t len = c->primary_buf.len;
+  bool blank = true;
+  for (size_t i = 0; i < len && blank; i++) blank = t[i] == ' ' || t[i] == '\n' || t[i] == '\t' || t[i] == '\r';
+  if (!blank && utf8_valid((const uint8_t *)t, len)) {
+    struct fmt_in f = { MIME_TEXT, (const uint8_t *)t, len, mime_text_default_aliases, mime_text_default_alias_count };
+    struct clip_in in = { .fmts = &f, .n_fmts = 1, .source_app = c->primary_app,
+                          .group_id = rules_route_group(app->db, c->primary_app) };
+    int64_t id;
+    enum add_result r = db_add_clip(app->db, &in, &id);
+    if (r != ADD_ERR) app_emit_clip(app, r == ADD_NEW ? "clip.added" : "clip.updated", id);
+  }
+  primary_stop(c);
+}
+
+static void on_primary_readable(void *ctx, int fd, uint32_t events)
+{
+  struct capture *c = ctx;
+  char chunk[65536];
+  for (;;) {
+    ssize_t r = read(fd, chunk, sizeof chunk);
+    if (r > 0) {
+      if (c->primary_buf.len + (size_t)r > PRIMARY_CAP) { primary_stop(c); return; }
+      buf_append(&c->primary_buf, chunk, (size_t)r);
+      continue;
+    }
+    if (r == 0) { primary_store(c); return; }
+    if (errno == EINTR) continue;
+    if (errno != EAGAIN) primary_stop(c);
+    return;
+  }
+}
+
+static void on_primary_timeout(void *ctx)
+{
+  struct capture *c = ctx;
+  c->primary_timer = NULL;
+  primary_stop(c);
+}
+
+static void on_primary_settled(void *ctx)
+{
+  struct capture *c = ctx;
+  c->primary_timer = NULL;
+  struct mime_plan plan;
+  mime_plan_build(&plan, (const char *const *)c->primary_offer->mimes, c->primary_offer->n_mimes);
+  if (!plan.n_reads || strcmp(plan.reads[0].canonical, MIME_TEXT)) { primary_stop(c); return; }
+  int p[2];
+  if (pipe2(p, O_CLOEXEC) < 0) { primary_stop(c); return; }
+  set_nonblock(p[0]);
+  wl_offer_receive(c->app->wl, c->primary_offer, plan.reads[0].offered, p[1]);
+  close(p[1]);
+  c->primary_fd = p[0];
+  c->primary_watch = loop_add_fd(c->app->loop, c->primary_fd, EPOLLIN, on_primary_readable, c);
+  c->primary_timer = loop_timer(c->app->loop, FORMAT_TIMEOUT_MS, on_primary_timeout, c);
+}
+
 void capture_on_primary(struct capture *c, struct wl_offer *offer)
 {
-  /* PRIMARY (select-to-copy) capture is a Phase 3 option, off by default. */
-  wl_offer_destroy(offer);
+  struct app *app = c->app;
+  primary_stop(c);
+  if (!offer) return;
+  if (!setting_bool(app->db, "capture_primary") || app_paused(app)) { wl_offer_destroy(offer); return; }
+  struct mime_plan plan;
+  mime_plan_build(&plan, (const char *const *)offer->mimes, offer->n_mimes);
+  const char *app_class = app->hypr ? hypr_active_class(app->hypr) : NULL;
+  if (plan.is_ours || plan.is_sensitive || rules_excluded(app->db, app_class)) { wl_offer_destroy(offer); return; }
+  c->primary_offer = offer;
+  c->primary_app = app_class ? xstrdup(app_class) : NULL;
+  c->primary_timer = loop_timer(app->loop, PRIMARY_SETTLE_MS, on_primary_settled, c);
 }

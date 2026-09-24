@@ -49,6 +49,8 @@ bool wl_has_shortcuts(struct wl *wl);
 /* Ask the compositor whether anything is on the clipboard right now. The
  * main device is not told when a clipboard owner exits (Hyprland 0.56 sends
  * no selection(NULL) then), but a newly created device always receives the
- * current selection, so a throwaway device answers the question. */
+ * current selection, so a throwaway device on a throwaway connection answers
+ * the question. Synchronous (≤ 250 ms, typically ~1 ms); cb runs before it
+ * returns. On any doubt it reports "occupied". */
 typedef void (*wl_probe_cb)(void *ctx, bool has_selection);
 void wl_probe_selection(struct wl *wl, wl_probe_cb cb, void *ctx);

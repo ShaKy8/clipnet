@@ -56,6 +56,18 @@ void run_tests(void)
 
   struct accel a;
   const char *err;
+  char mods[32];
+  CHECK(accel_parse_send("Shift+Insert", &a, &err));
+  accel_hypr_mods(&a, mods);
+  CHECK_STR(mods, "SHIFT");
+  CHECK_STR(accel_keysym(&a), "Insert");
+  CHECK(accel_parse_send("Ctrl+Shift+V", &a, &err));
+  accel_hypr_mods(&a, mods);
+  CHECK_STR(mods, "CTRL SHIFT");
+  CHECK(accel_parse_send("Insert", &a, &err));
+  accel_hypr_mods(&a, mods);
+  CHECK_STR(mods, "");
+  CHECK(!accel_parse_send("Ctrl+Nope", &a, &err));
   CHECK(accel_parse("Ctrl+Apostrophe", &a, &err));
   CHECK(accel_matches_hypr(&a, 4, "apostrophe"));
   CHECK(accel_matches_hypr(&a, 4 | 16, "apostrophe")); /* Num Lock on */

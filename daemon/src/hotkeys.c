@@ -8,6 +8,7 @@
 
 #include "accel.h"
 #include "app.h"
+#include "buffers.h"
 #include "cJSON.h"
 #include "db.h"
 #include "hypr.h"
@@ -39,7 +40,12 @@ void hotkeys_free(struct hotkeys *hk)
 
 static bool valid_action(const char *action)
 {
-  return !strcmp(action, "paste_clip") || !strcmp(action, "paste_position");
+  static const char *const actions[] = {
+    "paste_clip", "paste_position", "buffer_copy", "buffer_cut", "buffer_paste", "pause_toggle",
+  };
+  for (size_t i = 0; i < ARRAY_LEN(actions); i++)
+    if (!strcmp(action, actions[i])) return true;
+  return false;
 }
 
 /* A short, content-free label: bind descriptions are visible in Omarchy's
@@ -48,6 +54,10 @@ static bool valid_action(const char *action)
 static char *label_for(struct hotkeys *hk, const char *action, const char *arg)
 {
   if (!strcmp(action, "paste_position")) return xasprintf("paste history item %s", arg);
+  if (!strcmp(action, "buffer_copy")) return xasprintf("copy into buffer %s", arg);
+  if (!strcmp(action, "buffer_cut")) return xasprintf("cut into buffer %s", arg);
+  if (!strcmp(action, "buffer_paste")) return xasprintf("paste buffer %s", arg);
+  if (!strcmp(action, "pause_toggle")) return xstrdup("pause or resume recording");
   sqlite3_stmt *st;
   char *out = NULL;
   if (sqlite3_prepare_v2(H(hk), "SELECT id, title FROM clips WHERE uuid = ?", -1, &st, NULL) == SQLITE_OK) {
@@ -114,14 +124,29 @@ static void on_pressed(void *ctx, const char *name)
   sqlite3_finalize(st);
   if (!action) return; /* deleted since it was bound */
 
+  const char *err = NULL;
+  int slot = arg ? atoi(arg) : 0;
+  if (!strcmp(action, "buffer_copy") || !strcmp(action, "buffer_cut")) {
+    if (buffers_copy(hk->app->buffers, slot, !strcmp(action, "buffer_cut"), &err) < 0) log_warn("hotkey: %s", err);
+    goto done;
+  }
+  if (!strcmp(action, "buffer_paste")) {
+    if (buffers_paste(hk->app->buffers, slot, &err) < 0) log_warn("hotkey: %s", err);
+    goto done;
+  }
+  if (!strcmp(action, "pause_toggle")) {
+    if (app_paused(hk->app)) app_resume(hk->app);
+    else app_pause(hk->app, 0);
+    goto done;
+  }
   int64_t clip = 0;
   if (!strcmp(action, "paste_clip") && arg) clip = db_clip_id_by_uuid(hk->app->db, arg);
   else if (!strcmp(action, "paste_position") && arg) clip = db_id_at_position(hk->app->db, atoi(arg) - 1);
   if (clip) {
     struct paste_req req = { .ids = &clip, .n_ids = 1, .mode = SERVE_ALL, .send_keys = true };
-    const char *err = NULL;
     if (paste_run(hk->app, &req, &err) < 0) log_warn("hotkey h%lld: %s", (long long)id, err);
   }
+done:
   free(action);
   free(arg);
 }
@@ -233,7 +258,12 @@ int64_t hotkeys_set(struct hotkeys *hk, int64_t id, const char *accel_in, const 
   struct accel a;
   if (!accel_parse(accel_in, &a, err)) return -1;
   if (!action || !valid_action(action)) { *err = "unknown hotkey action"; return -1; }
+  if (!strcmp(action, "pause_toggle")) arg = "";
   if (!arg) { *err = "the action needs an argument"; return -1; }
+  if (!strncmp(action, "buffer_", 7) && (atoi(arg) < 1 || atoi(arg) > BUFFER_SLOTS || arg[1])) {
+    *err = "copy buffers are 1, 2 and 3";
+    return -1;
+  }
   if (!strcmp(action, "paste_clip") && !db_clip_id_by_uuid(hk->app->db, arg)) { *err = "no such clip"; return -1; }
   if (!strcmp(action, "paste_position")) {
     int n = atoi(arg);

@@ -95,7 +95,32 @@ static uint32_t mod_bit(const char *tok)
   return 0;
 }
 
+static bool parse(const char *s, struct accel *out, const char **err, bool for_binding);
+
 bool accel_parse(const char *s, struct accel *out, const char **err)
+{
+  return parse(s, out, err, true);
+}
+
+bool accel_parse_send(const char *s, struct accel *out, const char **err)
+{
+  return parse(s, out, err, false);
+}
+
+void accel_hypr_mods(const struct accel *a, char out[32])
+{
+  snprintf(out, 32, "%s%s%s%s", a->mods & ACCEL_SUPER ? "SUPER " : "", a->mods & ACCEL_CTRL ? "CTRL " : "",
+           a->mods & ACCEL_ALT ? "ALT " : "", a->mods & ACCEL_SHIFT ? "SHIFT " : "");
+  size_t n = strlen(out);
+  if (n) out[n - 1] = 0;
+}
+
+const char *accel_keysym(const struct accel *a)
+{
+  return keysym_of(a->key);
+}
+
+static bool parse(const char *s, struct accel *out, const char **err, bool for_binding)
 {
   memset(out, 0, sizeof *out);
   char buf[128];
@@ -121,6 +146,7 @@ bool accel_parse(const char *s, struct accel *out, const char **err)
   }
   if (mod_bit(tokens[n - 1])) { *err = "a shortcut needs a key after the modifiers"; return false; }
   if (!canon_key(tokens[n - 1], out->key)) { *err = "unsupported key"; return false; }
+  if (!for_binding) return true;
   if (!out->mods && !is_fkey(out->key, NULL)) { *err = "add a modifier (Ctrl, Alt, Shift or Super)"; return false; }
   if (out->mods == ACCEL_SHIFT && !is_fkey(out->key, NULL)) {
     *err = "Shift alone would stop you typing that key; add Ctrl, Alt or Super";

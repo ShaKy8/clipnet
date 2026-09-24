@@ -34,6 +34,8 @@ struct source {
   size_t *fmt_of; /* names[i] → cp.fmts index */
   size_t n_names;
   int64_t clip_id;
+  serve_read_cb read_cb;
+  void *read_ctx;
 };
 
 struct writer {
@@ -159,6 +161,11 @@ static void on_send(void *data, struct ext_data_control_source_v1 *proxy, const 
     if (!strcmp(src->names[i], mime)) {
       const struct fmt_out *f = &src->pl->cp.fmts[src->fmt_of[i]];
       start_writer(src->serve, src->pl, f->data, f->len, fd);
+      if (src->read_cb) {
+        serve_read_cb cb = src->read_cb;
+        src->read_cb = NULL;
+        cb(src->read_ctx);
+      }
       return;
     }
   }
@@ -262,6 +269,13 @@ int serve_clip(struct serve *s, int64_t id, enum serve_mode mode)
 int serve_text(struct serve *s, const char *text, size_t len, int64_t clip_id)
 {
   return own(s, text_payload(text, len, NULL), clip_id);
+}
+
+void serve_on_first_read(struct serve *s, serve_read_cb cb, void *ctx)
+{
+  if (!s->current) return;
+  s->current->read_cb = cb;
+  s->current->read_ctx = ctx;
 }
 
 int64_t serve_current(struct serve *s)

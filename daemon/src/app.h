@@ -25,6 +25,7 @@ struct ipc;
 struct capture;
 struct serve;
 struct hotkeys;
+struct buffers;
 
 struct app {
   struct loop *loop;
@@ -35,6 +36,7 @@ struct app {
   struct capture *capture;
   struct serve *serve;
   struct hotkeys *hotkeys;
+  struct buffers *buffers;
 
   char *runtime_dir;     /* $XDG_RUNTIME_DIR/clipnet */
   char *socket_path;
