@@ -3,7 +3,8 @@
 Thanks for helping. CLIP//NET is a small project with a clear goal: bring
 [Ditto](https://github.com/sabrogden/Ditto)'s clipboard history to Omarchy and
 Hyprland, faithfully and without fuss. Bug reports, fixes, and features that
-close a gap with Ditto are all welcome. For a larger change, open an issue
+close a gap with Ditto are all welcome. Everyone taking part agrees to the
+[code of conduct](CODE_OF_CONDUCT.md). For a larger change, open an issue
 first so we can agree on the approach before you spend the time.
 
 ## Reporting a bug
