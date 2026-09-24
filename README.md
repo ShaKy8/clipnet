@@ -1,5 +1,7 @@
 # CLIP//NET
 
+[![tests](https://github.com/ShaKy8/clipnet/actions/workflows/tests.yml/badge.svg)](https://github.com/ShaKy8/clipnet/actions/workflows/tests.yml)
+
 [Ditto](https://github.com/sabrogden/Ditto) for Omarchy: every copy is kept
 with all of its formats, and **Ctrl+'** brings the history up at the mouse
 cursor. Type to search, then press Enter to paste into the window you came from.
@@ -147,6 +149,10 @@ make -C daemon bench   timings with 50,000 synthetic clips (N=… to change)
 tools/readme-screenshot.sh   retake docs/screenshot.png from invented demo clips
 CLIPNETD=/path/to/asan/clipnetd tests/integration/live_test.sh
 ```
+
+GitHub Actions runs `make test` and `make asan` on every push, plus the live
+clipboard test against a headless Sway (everything except the
+Hyprland-specific checks), in an Arch Linux container.
 
 `docs/PROTOCOL.md` is the socket API, `docs/SCHEMA.md` is the database
 contract (including what a macOS port maps differently), and exports are self-describing JSON
