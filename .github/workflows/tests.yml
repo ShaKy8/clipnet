@@ -1,0 +1,64 @@
+# Runs in an Arch Linux container: the daemon needs wayland-protocols 1.39+
+# (ext-data-control-v1), which Ubuntu runners do not have, and Arch is what
+# Omarchy is built on.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    name: unit, QML, IPC and config-block tests
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git wayland wayland-protocols sqlite lua54 python jq qt6-declarative
+      - uses: actions/checkout@v4
+      - name: make test
+        run: make test
+
+  sanitizers:
+    name: unit tests under ASan + UBSan
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+      # LeakSanitizer needs ptrace to stop threads while it scans.
+      options: --cap-add SYS_PTRACE
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git wayland wayland-protocols sqlite lua54
+      - uses: actions/checkout@v4
+      - name: make asan
+        run: make asan
+
+  live:
+    name: live clipboard round trip (headless Sway)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - name: Install dependencies
+        run: pacman -Syu --noconfirm --needed base-devel git wayland wayland-protocols sqlite lua54 jq sway wl-clipboard diffutils
+      - uses: actions/checkout@v4
+      - name: Build
+        run: make -C daemon clipnetd build/tests/offer
+      # Sway won't run as root, and a compositor needs its own runtime dir.
+      - name: Test user
+        run: |
+          useradd -m tester
+          chown -R tester "$GITHUB_WORKSPACE"
+          install -d -m 700 -o tester /tmp/xdg-tester
+      - name: Live test
+        run: |
+          su tester -c '
+            set -e
+            export XDG_RUNTIME_DIR=/tmp/xdg-tester
+            export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+            sway -c /dev/null > /tmp/xdg-tester/sway.log 2>&1 &
+            for i in $(seq 100); do [ -S /tmp/xdg-tester/wayland-1 ] && break; sleep 0.1; done
+            [ -S /tmp/xdg-tester/wayland-1 ] || { cat /tmp/xdg-tester/sway.log; exit 1; }
+            export WAYLAND_DISPLAY=wayland-1
+            cd "'"$GITHUB_WORKSPACE"'"
+            tests/integration/live_test.sh
+          '
