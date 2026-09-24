@@ -86,6 +86,10 @@ follows the Omarchy theme), and `Daemon.call(op, args, cb)` for everything
 the UI asks of the daemon. Pure logic goes in a `.pragma library` `.js` file
 with a test in `tests/qml/`.
 
+`.editorconfig` sets the basics (UTF-8, LF, two-space indent, four for
+Python, tabs in Makefiles) for most editors. Continuation lines may be
+aligned under an opening parenthesis.
+
 **Comments** say *why*, not *what*. Match the tone of the code around them.
 
 **Things that must stay true:**
