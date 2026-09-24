@@ -161,3 +161,10 @@ names, uuids.
   already-destroyed offer to the `selection` event as NULL.
 - Once the popup hides, `hl.get_layers({namespace="clipnet"})` is empty within
   50 ms, and `hl.get_active_window()` is the window the user came from.
+
+## License
+
+MIT (see `LICENSE`). Bundled third-party files keep their own licenses, stated
+at the top of each: `daemon/vendor/cJSON.{c,h}` (MIT) and
+`daemon/protocols/hyprland-global-shortcuts-v1.xml` (BSD-3-Clause).
+CLIP//NET recreates Ditto's behaviour but contains none of its code.
