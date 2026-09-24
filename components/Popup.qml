@@ -167,7 +167,15 @@ PanelWindow {
     // Searching in the Groups list looks through every clip.
     const args = { query: query, limit: 300 }
     if (groupId && !groupsRoot) args.group = groupId
-    Daemon.call("list", args, (r) => { if (r) done(r.rows, r.total, r.more) })
+    Daemon.call("list", args, (r, err) => {
+      if (r) { offlineText = ""; done(r.rows, r.total, r.more); return }
+      // Never leave an old list standing in for results we could not get.
+      if (err && err.code === "offline") {
+        offlineText = "clipnetd is not running — start it with: clipnet start"
+        rows = []
+        total = 0
+      }
+    })
   }
 
   function loadGroups(then) {
@@ -207,6 +215,7 @@ PanelWindow {
       }
     }
     function onConnectedAgain() {
+      popup.offlineText = ""
       popup.stale = true
       eventRefresh.restart()
       popup.loadGroups()

@@ -287,7 +287,11 @@ case "${1:-start}" in
     ;;
   status)
     if daemon_running; then echo "daemon: running"; ctl '{"op":"state.get"}'; else echo "daemon: stopped"; fi
-    if ui_running; then echo "ui: running"; else echo "ui: stopped"; fi
+    if ui_running; then
+      echo "ui: running ($(quickshell ipc -p "$ROOT" call clipnet status 2>/dev/null || echo unknown))"
+    else
+      echo "ui: stopped"
+    fi
     ;;
   toggle|show|hide|settings) quickshell ipc -p "$ROOT" call clipnet "$1" ;;
   paste|copy)

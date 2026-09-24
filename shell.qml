@@ -55,5 +55,6 @@ ShellRoot {
     function hide(): void { popup.hide() }
     function reloadTheme(): void { Theme.reload() }
     function settings(): void { settingsLoader.open() }
+    function status(): string { return Daemon.ready ? "connected" : "offline" }
   }
 }
