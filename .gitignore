@@ -1,0 +1,4 @@
+# Built by `make -C daemon` (scripts/clipnet builds it when stale)
+daemon/clipnetd
+daemon/build/
+daemon/gen/

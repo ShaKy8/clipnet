@@ -1,0 +1,4 @@
+module qs.common
+singleton Theme 1.0 Theme.qml
+singleton Daemon 1.0 Daemon.qml
+Format 1.0 Format.js

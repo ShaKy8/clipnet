@@ -1,0 +1,7 @@
+#!/bin/bash
+# Omarchy font-set hook (installed by `clipnet install`): Qt caches what the
+# "monospace" alias resolves to, so restart the CLIP//NET popup (only the UI;
+# the daemon, and whatever it has on the clipboard, is untouched).
+ROOT="@ROOT@"
+pgrep -f "quickshell.* -p $ROOT\$" >/dev/null 2>&1 || exit 0
+"$ROOT/scripts/clipnet" restart-ui >/dev/null 2>&1 || true

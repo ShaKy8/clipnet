@@ -1,0 +1,6 @@
+#!/bin/bash
+# Omarchy theme-set hook (installed by `clipnet install`): recolor the
+# CLIP//NET popup for the new theme. Never fails the theme switch.
+ROOT="@ROOT@"
+pgrep -f "quickshell.* -p $ROOT\$" >/dev/null 2>&1 || exit 0
+timeout 2 quickshell ipc -p "$ROOT" call clipnet reloadTheme >/dev/null 2>&1 || true

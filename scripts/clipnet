@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+#
+# CLIP//NET control.
+#
+#   clipnet                     start (daemon + UI; no-op if running)
+#   clipnet start|stop|restart|status|restart-ui
+#   clipnet toggle|show|hide    the popup (Ctrl+' does the same)
+#   clipnet paste N | copy N    paste / copy history position N (1 = newest)
+#   clipnet list [-n N] [TEXT]  recent clips, or those matching TEXT
+#   clipnet pause [MINUTES] | resume
+#   clipnet get KEY | set KEY JSON-VALUE | settings
+#   clipnet import-omarchy      copy Omarchy's clipboard history in (safe to repeat)
+#   clipnet install | uninstall [--purge]
+#   clipnet ctl '<json>'        raw request to the daemon
+set -euo pipefail
+umask 077
+
+ROOT="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+BIN="$ROOT/daemon/clipnetd"
+UNIT=clipnetd.service
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/clipnet"
+INSTALL_STATE="$STATE_DIR/install.json"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/clipnet"
+HYPR_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/hypr"
+BEGIN_MARK="-- >>> CLIP//NET (managed) >>>"
+END_MARK="-- <<< CLIP//NET (managed) <<<"
+OMARCHY_PLUGIN=omarchy.clipboard
+HOOK_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/hooks"
+# Omarchy's own pattern for its watchers (plugins/clipboard/Clipboard.qml).
+OMARCHY_WATCHERS='wl-paste .*--watch .*/shell/plugins/clipboard/capture\.sh'
+
+die() { echo "clipnet: $*" >&2; exit 1; }
+say() { echo "clipnet: $*"; }
+
+# ---- building and running ---------------------------------------------------
+
+build() {
+  local stale=false
+  [[ -x $BIN ]] || stale=true
+  if ! $stale; then
+    local newer
+    newer=$(find "$ROOT/daemon/src" "$ROOT/daemon/Makefile" "$ROOT/daemon/vendor" "$ROOT/daemon/protocols" \
+      -newer "$BIN" -print -quit 2>/dev/null)
+    [[ -n $newer ]] && stale=true
+  fi
+  if $stale; then make -s -C "$ROOT/daemon" clipnetd >/dev/null || die "build failed (make -C daemon)"; fi
+}
+
+ctl() { "$BIN" --ctl "$1"; }
+
+ui_running() { pgrep -f "quickshell.* -p $ROOT\$" >/dev/null; }
+unit_installed() { [[ -f $UNIT_DIR/$UNIT ]]; }
+daemon_running() { "$BIN" --ctl '{"op":"ping"}' >/dev/null 2>&1; }
+
+start_daemon() {
+  daemon_running && return 0
+  if unit_installed; then
+    systemctl --user start "$UNIT"
+  else
+    # Not installed: run it detached, the way the unit would.
+    setsid -f "$BIN" >/dev/null 2>&1 < /dev/null
+  fi
+  for _ in $(seq 40); do daemon_running && return 0; sleep 0.05; done
+  die "clipnetd did not start (journalctl --user -u $UNIT)"
+}
+
+start_ui() {
+  ui_running && return 0
+  setsid -f quickshell -n -d -p "$ROOT" >/dev/null 2>&1 < /dev/null
+}
+
+stop_all() {
+  pkill -f "quickshell.* -p $ROOT\$" 2>/dev/null || true
+  if unit_installed && systemctl --user is-active --quiet "$UNIT"; then
+    systemctl --user stop "$UNIT"
+  else
+    pkill -x clipnetd 2>/dev/null || true
+  fi
+  for _ in $(seq 40); do daemon_running || return 0; sleep 0.05; done
+}
+
+# ---- managed config blocks --------------------------------------------------
+
+backup() { cp -p "$1" "$1.bak.$(date +%s)"; }
+
+# write_block FILE CONTENT: replace our block in FILE (or append one). The
+# file is backed up first, and left untouched when nothing changes.
+write_block() {
+  local file=$1 content=$2 tmp
+  [[ -f $file ]] || die "$file does not exist"
+  tmp=$(mktemp)
+  # Content goes through the environment: awk -v would expand backslashes.
+  CLIPNET_BLOCK="$content" awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+    BEGIN { content = ENVIRON["CLIPNET_BLOCK"] }
+    $0 == b { skipping = 1; if (!done) { print b; print content; print e; done = 1 } ; next }
+    $0 == e { skipping = 0; next }
+    !skipping { print }
+    END { if (!done) { print ""; print b; print content; print e } }
+  ' "$file" > "$tmp"
+  if cmp -s "$tmp" "$file"; then rm -f "$tmp"; return; fi
+  backup "$file"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+remove_block() {
+  local file=$1 tmp
+  [[ -f $file ]] && grep -qxF -e "$BEGIN_MARK" "$file" || return 0
+  tmp=$(mktemp)
+  # Drop the block and the blank line write_block put before it.
+  awk -v b="$BEGIN_MARK" -v e="$END_MARK" '
+    $0 == b { skipping = 1; if (held) held = 0; next }
+    $0 == e { skipping = 0; next }
+    skipping { next }
+    { if (held) print ""; held = 0 }
+    $0 == "" { held = 1; next }
+    { print }
+    END { if (held) print "" }
+  ' "$file" > "$tmp"
+  backup "$file"
+  cat "$tmp" > "$file"
+  rm -f "$tmp"
+}
+
+state_get() { [[ -f $INSTALL_STATE ]] && jq -r ".$1 // empty" "$INSTALL_STATE" || true; }
+state_set() {
+  mkdir -p "$STATE_DIR"
+  local cur='{}'
+  [[ -f $INSTALL_STATE ]] && cur=$(cat "$INSTALL_STATE")
+  jq --arg k "$1" --argjson v "$2" '.[$k] = $v' <<<"$cur" > "$INSTALL_STATE.tmp"
+  mv "$INSTALL_STATE.tmp" "$INSTALL_STATE"
+}
+
+# "enabled", "disabled", or "" when Omarchy does not know the plugin.
+omarchy_plugin_state() {
+  omarchy plugin list --json 2>/dev/null | jq -r --arg id "$OMARCHY_PLUGIN" \
+    'map(select(.id == $id)) | .[0] | if . == null then "" elif .enabled then "enabled" else "disabled" end' \
+    2>/dev/null || true
+}
+
+hypr_reload() { hyprctl reload config-only >/dev/null 2>&1 || hyprctl reload >/dev/null 2>&1 || true; }
+
+# After every config change: Hyprland must load it cleanly.
+hypr_validate() {
+  local errs
+  errs=$(hyprctl configerrors 2>/dev/null | sed '/^[[:space:]]*$/d')
+  [[ -z $errs ]] && return 0
+  echo "clipnet: Hyprland reports config errors:" >&2
+  sed 's/^/  /' <<<"$errs" >&2
+  return 1
+}
+
+# Omarchy hooks: installed with Omarchy's own installer, from templates that
+# know where this checkout lives.
+install_hook() { # event template
+  local tmp
+  tmp=$(mktemp -d)
+  sed "s|@ROOT@|$ROOT|g" "$ROOT/scripts/hooks/$2" > "$tmp/$2"
+  omarchy hook install "$1" "$tmp/$2" >/dev/null
+  rm -rf "$tmp"
+}
+
+install() {
+  command -v quickshell >/dev/null || die "quickshell is not installed"
+  command -v jq >/dev/null || die "jq is not installed"
+  build
+
+  # A daemon started by hand (not by systemd) would hold the lock.
+  if daemon_running && ! systemctl --user is-active --quiet "$UNIT" 2>/dev/null; then
+    say "stopping the running clipnetd so systemd can take over"
+    pkill -x clipnetd || true
+    sleep 0.3
+  fi
+
+  mkdir -p "$UNIT_DIR"
+  sed "s|@ROOT@|$ROOT|g" "$ROOT/systemd/$UNIT" > "$UNIT_DIR/$UNIT.tmp"
+  mv "$UNIT_DIR/$UNIT.tmp" "$UNIT_DIR/$UNIT"
+  systemctl --user daemon-reload
+  systemctl --user enable --now "$UNIT" >/dev/null 2>&1 || die "could not start $UNIT"
+  say "daemon installed as a user service ($UNIT)"
+
+  # Replace Omarchy's clipboard manager, remembering whether it was on.
+  if [[ -z $(state_get omarchy_plugin_was) ]]; then
+    local was
+    was=$(omarchy_plugin_state)
+    state_set omarchy_plugin_was "\"${was:-unknown}\""
+  fi
+  if [[ $(omarchy_plugin_state) == enabled ]]; then
+    omarchy plugin disable "$OMARCHY_PLUGIN" >/dev/null 2>&1 || say "warning: could not disable $OMARCHY_PLUGIN"
+    state_set disabled_omarchy_plugin true
+    say "disabled Omarchy's clipboard manager ($OMARCHY_PLUGIN)"
+  fi
+  sleep 0.5
+  pkill -f "$OMARCHY_WATCHERS" 2>/dev/null || true
+
+  write_block "$HYPR_DIR/autostart.lua" "o.launch_on_start(\"$ROOT/scripts/clipnet start\")"
+  write_block "$HYPR_DIR/bindings.lua" "-- Clipboard history. Replaces Omarchy's clipboard manager (plugin
+-- $OMARCHY_PLUGIN, disabled by \`clipnet install\`; \`clipnet uninstall\` restores it).
+hl.unbind(\"SUPER + CTRL + V\")
+o.bind(\"SUPER + CTRL + V\", \"Clipboard history\", hl.dsp.global(\"clipnet:toggle\"))
+o.bind(\"CTRL + apostrophe\", \"Clipboard history\", hl.dsp.global(\"clipnet:toggle\"))"
+  write_block "$HYPR_DIR/looknfeel.lua" "hl.layer_rule({ match = { namespace = \"^clipnet\$\" }, no_anim = true, animation = \"none\" })"
+  hypr_reload
+  hypr_validate || die "fix the errors above (or run: clipnet uninstall)"
+  say "Hyprland: Ctrl+' and Super+Ctrl+V open CLIP//NET (Super+Ctrl+V was Omarchy's clipboard manager)"
+
+  install_hook theme-set clipnet-theme
+  install_hook font-set clipnet-font
+  say "Omarchy hooks: the popup follows theme and font changes"
+
+  start_ui
+
+  if [[ $(state_get imported_omarchy) != true ]]; then
+    local omarchy_history="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/clipboard-history.json"
+    if [[ -f $omarchy_history ]]; then
+      local r
+      r=$(ctl '{"op":"import","format":"omarchy"}') && say "imported Omarchy history: $(jq -c . <<<"$r")"
+    fi
+    state_set imported_omarchy true
+  fi
+  say "installed"
+}
+
+uninstall() {
+  local purge=false
+  [[ ${1:-} == --purge ]] && purge=true
+
+  remove_block "$HYPR_DIR/autostart.lua"
+  remove_block "$HYPR_DIR/bindings.lua"
+  remove_block "$HYPR_DIR/looknfeel.lua"
+  hypr_reload
+  hypr_validate || true
+  rm -f "$HOOK_DIR/theme-set.d/clipnet-theme" "$HOOK_DIR/font-set.d/clipnet-font"
+
+  pkill -f "quickshell.* -p $ROOT\$" 2>/dev/null || true
+  if unit_installed; then
+    systemctl --user disable --now "$UNIT" >/dev/null 2>&1 || true
+    rm -f "$UNIT_DIR/$UNIT"
+    systemctl --user daemon-reload
+  fi
+  pkill -x clipnetd 2>/dev/null || true
+
+  if [[ $(state_get disabled_omarchy_plugin) == true ]]; then
+    omarchy plugin enable "$OMARCHY_PLUGIN" >/dev/null 2>&1 || say "warning: could not re-enable $OMARCHY_PLUGIN"
+    say "re-enabled Omarchy's clipboard manager"
+  fi
+  rm -f "$INSTALL_STATE"
+
+  if $purge; then
+    rm -rf "$DATA_DIR" "$STATE_DIR"
+    say "removed clip history ($DATA_DIR)"
+  else
+    say "clip history kept in $DATA_DIR (uninstall --purge removes it)"
+  fi
+  say "uninstalled"
+}
+
+# ---- everyday commands ------------------------------------------------------
+
+list() {
+  local n=20 q=""
+  while (($#)); do
+    case $1 in
+      -n) n=$2; shift 2 ;;
+      *) q+="${q:+ }$1"; shift ;;
+    esac
+  done
+  ctl "$(jq -cn --arg q "$q" --argjson n "$n" '{op: "list", query: $q, limit: $n}')" |
+    jq -r '.rows | to_entries[] | "\(.key + 1)\t\(.value.kind)\t\(.value.title // .value.preview)"'
+}
+
+main() {
+case "${1:-start}" in
+  start)
+    build
+    start_daemon
+    start_ui
+    ;;
+  stop) stop_all ;;
+  restart) stop_all; build; start_daemon; start_ui ;;
+  restart-ui)
+    pkill -f "quickshell.* -p $ROOT\$" 2>/dev/null || true
+    for _ in $(seq 40); do ui_running || break; sleep 0.05; done
+    start_ui
+    ;;
+  status)
+    if daemon_running; then echo "daemon: running"; ctl '{"op":"state.get"}'; else echo "daemon: stopped"; fi
+    if ui_running; then echo "ui: running"; else echo "ui: stopped"; fi
+    ;;
+  toggle|show|hide) quickshell ipc -p "$ROOT" call clipnet "$1" ;;
+  paste|copy)
+    [[ ${2:-} =~ ^[0-9]+$ ]] || die "usage: clipnet $1 N"
+    ctl "{\"op\":\"${1}_position\",\"n\":$2}" >/dev/null
+    ;;
+  list) shift; list "$@" ;;
+  pause)
+    m=${2:-0}
+    [[ $m =~ ^[0-9]+$ ]] || die "usage: clipnet pause [MINUTES]"
+    ctl "{\"op\":\"pause\",\"minutes\":$m}" >/dev/null
+    ;;
+  resume) ctl '{"op":"resume"}' >/dev/null ;;
+  settings) ctl '{"op":"settings.get"}' ;;
+  get) ctl '{"op":"settings.get"}' | jq ".\"${2:?usage: clipnet get KEY}\"" ;;
+  set)
+    [[ $# -eq 3 ]] || die "usage: clipnet set KEY JSON-VALUE   (e.g. clipnet set max_clips 1000)"
+    ctl "$(jq -cn --arg k "$2" --argjson v "$3" '{op: "settings.set", key: $k, value: $v}')" >/dev/null
+    ;;
+  import-omarchy) ctl '{"op":"import","format":"omarchy"}' ;;
+  install) install ;;
+  uninstall) shift; uninstall "$@" ;;
+  ctl) ctl "${2:?usage: clipnet ctl '<json>'}" ;;
+  -h|--help|help) sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$1' (clipnet help)" ;;
+esac
+}
+
+# Sourcing (tests) defines the functions without running anything.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

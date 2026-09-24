@@ -1,0 +1,283 @@
+#include "wl.h"
+
+#include <errno.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/epoll.h>
+#include <unistd.h>
+#include <wayland-client.h>
+
+#include "app.h"
+#include "capture.h"
+#include "ext-data-control-v1.h"
+#include "loop.h"
+#include "util.h"
+
+#define MAX_MIMES 128
+
+struct wl {
+  struct app *app;
+  struct wl_display *display;
+  struct wl_registry *registry;
+  struct wl_seat *seat;
+  struct ext_data_control_manager_v1 *manager;
+  struct ext_data_control_device_v1 *device;
+  struct loop_watch *watch;
+  bool want_write;
+};
+
+void wl_offer_destroy(struct wl_offer *o)
+{
+  if (!o) return;
+  if (o->proxy) ext_data_control_offer_v1_destroy(o->proxy);
+  for (size_t i = 0; i < o->n_mimes; i++) free(o->mimes[i]);
+  free(o->mimes);
+  free(o);
+}
+
+static void offer_mime(void *data, struct ext_data_control_offer_v1 *proxy, const char *mime)
+{
+  struct wl_offer *o = data;
+  if (o->n_mimes >= MAX_MIMES) return;
+  o->mimes = xrealloc(o->mimes, (o->n_mimes + 1) * sizeof *o->mimes);
+  o->mimes[o->n_mimes++] = xstrdup(mime);
+}
+
+static const struct ext_data_control_offer_v1_listener offer_listener = { .offer = offer_mime };
+
+static void device_data_offer(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *proxy)
+{
+  struct wl_offer *o = xcalloc(1, sizeof *o);
+  o->proxy = proxy;
+  ext_data_control_offer_v1_add_listener(proxy, &offer_listener, o);
+}
+
+static struct wl_offer *offer_of(struct ext_data_control_offer_v1 *proxy)
+{
+  return proxy ? wl_proxy_get_user_data((struct wl_proxy *)proxy) : NULL;
+}
+
+static void device_selection(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *proxy)
+{
+  struct wl *wl = data;
+  /* Ownership of the offer passes to capture; NULL means the clipboard is
+   * now empty (its owner went away without handing it on). */
+  capture_on_selection(wl->app->capture, offer_of(proxy));
+}
+
+static void device_primary_selection(void *data, struct ext_data_control_device_v1 *dev,
+                                     struct ext_data_control_offer_v1 *proxy)
+{
+  struct wl *wl = data;
+  capture_on_primary(wl->app->capture, offer_of(proxy));
+}
+
+static void device_finished(void *data, struct ext_data_control_device_v1 *dev)
+{
+  struct wl *wl = data;
+  log_err("data-control device finished (seat gone?); exiting so systemd restarts us");
+  loop_quit(wl->app->loop);
+}
+
+static const struct ext_data_control_device_v1_listener device_listener = {
+  .data_offer = device_data_offer,
+  .selection = device_selection,
+  .finished = device_finished,
+  .primary_selection = device_primary_selection,
+};
+
+static void registry_global(void *data, struct wl_registry *reg, uint32_t name, const char *iface, uint32_t version)
+{
+  struct wl *wl = data;
+  if (!strcmp(iface, wl_seat_interface.name) && !wl->seat)
+    wl->seat = wl_registry_bind(reg, name, &wl_seat_interface, 1);
+  else if (!strcmp(iface, ext_data_control_manager_v1_interface.name))
+    wl->manager = wl_registry_bind(reg, name, &ext_data_control_manager_v1_interface, 1);
+}
+
+static void registry_global_remove(void *data, struct wl_registry *reg, uint32_t name) {}
+
+static const struct wl_registry_listener registry_listener = {
+  .global = registry_global,
+  .global_remove = registry_global_remove,
+};
+
+/* Before every wait: run anything already queued, then push our requests
+ * out. A full socket buffer is retried when the fd becomes writable. */
+static void prepare(void *ctx)
+{
+  struct wl *wl = ctx;
+  wl_display_dispatch_pending(wl->display);
+  wl_flush(wl);
+}
+
+void wl_flush(struct wl *wl)
+{
+  if (!wl) return;
+  int r = wl_display_flush(wl->display);
+  bool want = r < 0 && errno == EAGAIN;
+  if (want != wl->want_write) {
+    wl->want_write = want;
+    loop_mod_fd(wl->app->loop, wl->watch, EPOLLIN | (want ? EPOLLOUT : 0));
+  }
+}
+
+static void on_display(void *ctx, int fd, uint32_t events)
+{
+  struct wl *wl = ctx;
+  if (events & (EPOLLERR | EPOLLHUP)) {
+    log_err("Wayland connection lost; exiting");
+    loop_quit(wl->app->loop);
+    return;
+  }
+  if (events & EPOLLIN) {
+    if (wl_display_dispatch(wl->display) < 0) {
+      log_err("Wayland dispatch: %m; exiting");
+      loop_quit(wl->app->loop);
+      return;
+    }
+  }
+  if (events & EPOLLOUT) wl_flush(wl);
+}
+
+struct wl *wl_connect(struct app *app)
+{
+  struct wl *wl = xcalloc(1, sizeof *wl);
+  wl->app = app;
+  wl->display = wl_display_connect(NULL);
+  if (!wl->display) {
+    log_err("cannot connect to the Wayland display (is WAYLAND_DISPLAY set?)");
+    free(wl);
+    return NULL;
+  }
+  wl->registry = wl_display_get_registry(wl->display);
+  wl_registry_add_listener(wl->registry, &registry_listener, wl);
+  wl_display_roundtrip(wl->display);
+  if (!wl->seat || !wl->manager) {
+    log_err("compositor lacks %s", !wl->seat ? "a seat" : "ext-data-control-v1");
+    wl_disconnect(wl);
+    return NULL;
+  }
+  wl->device = ext_data_control_manager_v1_get_data_device(wl->manager, wl->seat);
+  ext_data_control_device_v1_add_listener(wl->device, &device_listener, wl);
+  wl->watch = loop_add_fd(app->loop, wl_display_get_fd(wl->display), EPOLLIN, on_display, wl);
+  loop_set_prepare(app->loop, prepare, wl);
+  return wl;
+}
+
+void wl_disconnect(struct wl *wl)
+{
+  if (!wl) return;
+  if (wl->watch) loop_del_fd(wl->app->loop, wl->watch);
+  if (wl->device) ext_data_control_device_v1_destroy(wl->device);
+  if (wl->manager) ext_data_control_manager_v1_destroy(wl->manager);
+  if (wl->seat) wl_seat_destroy(wl->seat);
+  if (wl->registry) wl_registry_destroy(wl->registry);
+  wl_display_flush(wl->display);
+  wl_display_disconnect(wl->display);
+  free(wl);
+}
+
+/* A probe: a throwaway device whose initial events describe the clipboard as
+ * it is now. Offers are kept (not destroyed on arrival: libwayland hands a
+ * destroyed object to the following selection event as NULL, which would
+ * read as "empty"), and a sync round trip marks the end of the initial
+ * burst, after which the answer is known and everything is torn down. */
+struct probe {
+  struct wl *wl;
+  struct ext_data_control_device_v1 *device;
+  struct wl_callback *sync;
+  struct ext_data_control_offer_v1 **offers;
+  size_t n_offers;
+  bool has_selection;
+  wl_probe_cb cb;
+  void *ctx;
+};
+
+static void probe_data_offer(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o)
+{
+  struct probe *p = data;
+  p->offers = xrealloc(p->offers, (p->n_offers + 1) * sizeof *p->offers);
+  p->offers[p->n_offers++] = o;
+}
+
+static void probe_selection(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o)
+{
+  struct probe *p = data;
+  p->has_selection = o != NULL;
+}
+
+static void probe_primary(void *data, struct ext_data_control_device_v1 *dev, struct ext_data_control_offer_v1 *o) {}
+
+static void probe_finished(void *data, struct ext_data_control_device_v1 *dev)
+{
+  /* The seat went away; the sync callback still completes the probe. */
+}
+
+static const struct ext_data_control_device_v1_listener probe_listener = {
+  .data_offer = probe_data_offer,
+  .selection = probe_selection,
+  .finished = probe_finished,
+  .primary_selection = probe_primary,
+};
+
+static void probe_done(void *data, struct wl_callback *cb, uint32_t serial)
+{
+  struct probe *p = data;
+  for (size_t i = 0; i < p->n_offers; i++) ext_data_control_offer_v1_destroy(p->offers[i]);
+  free(p->offers);
+  ext_data_control_device_v1_destroy(p->device);
+  wl_callback_destroy(p->sync);
+  wl_probe_cb done = p->cb;
+  void *ctx = p->ctx;
+  bool has = p->has_selection;
+  free(p);
+  done(ctx, has);
+}
+
+static const struct wl_callback_listener probe_sync_listener = { .done = probe_done };
+
+void wl_probe_selection(struct wl *wl, wl_probe_cb cb, void *ctx)
+{
+  struct probe *p = xcalloc(1, sizeof *p);
+  p->wl = wl;
+  p->cb = cb;
+  p->ctx = ctx;
+  p->device = ext_data_control_manager_v1_get_data_device(wl->manager, wl->seat);
+  ext_data_control_device_v1_add_listener(p->device, &probe_listener, p);
+  /* Requests are handled in order, so the device's initial events are all
+   * sent before this callback fires. */
+  p->sync = wl_display_sync(wl->display);
+  wl_callback_add_listener(p->sync, &probe_sync_listener, p);
+  wl_flush(wl);
+}
+
+void wl_offer_receive(struct wl *wl, struct wl_offer *o, const char *mime, int fd)
+{
+  ext_data_control_offer_v1_receive(o->proxy, mime, fd);
+  wl_flush(wl);
+}
+
+struct ext_data_control_source_v1 *wl_source_create(struct wl *wl, const struct ext_data_control_source_v1_listener *l,
+                                                    void *data)
+{
+  struct ext_data_control_source_v1 *s = ext_data_control_manager_v1_create_data_source(wl->manager);
+  ext_data_control_source_v1_add_listener(s, l, data);
+  return s;
+}
+
+void wl_source_offer(struct ext_data_control_source_v1 *s, const char *mime)
+{
+  ext_data_control_source_v1_offer(s, mime);
+}
+
+void wl_set_selection(struct wl *wl, struct ext_data_control_source_v1 *s)
+{
+  ext_data_control_device_v1_set_selection(wl->device, s);
+  wl_flush(wl);
+}
+
+void wl_source_destroy(struct ext_data_control_source_v1 *s)
+{
+  if (s) ext_data_control_source_v1_destroy(s);
+}
