@@ -121,8 +121,19 @@ static const char *const v1 =
   "  (3, '*onepassword*', 'exclude'),"
   "  (4, '*bitwarden*', 'exclude');";
 
+/* v2: a script file may define both on_copy and on_paste, so scripts are
+ * one row per file (name relative to the scripts directory) with no hook
+ * column. v1's table was never written to by any release. */
+static const char *const v2 =
+  "DROP TABLE scripts;"
+  "CREATE TABLE scripts("
+  "  id INTEGER PRIMARY KEY,"
+  "  name TEXT UNIQUE NOT NULL,"
+  "  enabled INTEGER NOT NULL DEFAULT 0,"
+  "  ord REAL NOT NULL DEFAULT 0);";
+
 /* Each entry upgrades from version i to i+1. Append only; never edit. */
-static const char *const migrations[] = { v1 };
+static const char *const migrations[] = { v1, v2 };
 
 int schema_version_latest(void)
 {

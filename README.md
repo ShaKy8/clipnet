@@ -54,6 +54,11 @@ message says what already owns them.
   `clipnet pause 60`, or a hotkey). The popup shows the time left.
 - **Select-to-copy** (Linux's PRIMARY selection) can be recorded too. It's
   off by default, because every highlight would otherwise land in the history.
+- **Scripts** (Settings → Scripts): Lua scripts that change or skip clips as
+  they're copied, or change text as it's pasted. For example: strip tracking
+  parameters from links, skip one-time codes, file git URLs into a group, or
+  keep pasted commands from running in a terminal. Examples are included,
+  scripts run in a sandbox, and each starts off. See `docs/SCRIPTING.md`.
 
 ## How it works
 

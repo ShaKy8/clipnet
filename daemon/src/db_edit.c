@@ -356,6 +356,36 @@ int db_group_delete(struct db *db, int64_t id, bool cascade, int64_t **affected,
   return 0;
 }
 
+int64_t db_group_ensure_path(struct db *db, const char *path, const char **err)
+{
+  int64_t parent = 0;
+  char *copy = xstrdup(path ? path : "");
+  char *save = NULL;
+  bool any = false;
+  for (char *part = strtok_r(copy, "/", &save); part; part = strtok_r(NULL, "/", &save)) {
+    char *name = trimmed(part);
+    if (!name) continue;
+    any = true;
+    sqlite3_stmt *st = dbi_prep(db, parent ? "SELECT id FROM groups WHERE parent_id = ? AND name = ?"
+                                           : "SELECT id FROM groups WHERE parent_id IS NULL AND name = ?");
+    int64_t id = 0;
+    if (st) {
+      int k = 1;
+      if (parent) sqlite3_bind_int64(st, k++, parent);
+      sqlite3_bind_text(st, k, name, -1, SQLITE_STATIC);
+      if (sqlite3_step(st) == SQLITE_ROW) id = sqlite3_column_int64(st, 0);
+      sqlite3_finalize(st);
+    }
+    if (!id) id = db_group_create(db, name, parent, err);
+    free(name);
+    if (id < 0) { free(copy); return -1; }
+    parent = id;
+  }
+  free(copy);
+  if (!any) { *err = "empty group path"; return -1; }
+  return parent;
+}
+
 cJSON *db_groups_list(struct db *db)
 {
   cJSON *arr = cJSON_CreateArray();

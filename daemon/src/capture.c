@@ -13,6 +13,7 @@
 #include "loop.h"
 #include "mime.h"
 #include "rules.h"
+#include "script.h"
 #include "serve.h"
 #include "settings.h"
 #include "util.h"
@@ -169,10 +170,31 @@ static void finish(struct capture *c)
     if (f->len) any_bytes = true;
   }
 
+  struct copy_verdict verdict = { .sticky = -1, .locked = -1 };
+  if (any_bytes && app->scripts) {
+    scripts_on_copy(app->scripts, fmts, n, c->source_app, c->source_title, &verdict);
+    if (verdict.skip) {
+      log_debug("a script chose not to store this copy");
+      any_bytes = false;
+    } else if (verdict.text) {
+      /* New text: the other formats no longer match it, so it becomes a
+       * plain-text clip (as an edit in the clip editor does). */
+      fmts[0] = (struct fmt_in){ MIME_TEXT, (const uint8_t *)verdict.text, strlen(verdict.text), mime_text_default_aliases,
+                                 mime_text_default_alias_count };
+      n = 1;
+    }
+  }
+
   if (!any_bytes) {
-    log_debug("selection had no content; not stored");
+    if (!verdict.skip) log_debug("selection had no content; not stored");
   } else {
     int64_t route = rules_route_group(app->db, c->source_app);
+    if (verdict.group) {
+      const char *gerr;
+      int64_t g = db_group_ensure_path(app->db, verdict.group, &gerr);
+      if (g > 0) route = g;
+      else log_warn("script group \"%s\": %s", verdict.group, gerr);
+    }
     bool keep_title = setting_bool(app->db, "store_source_title");
     struct clip_in in = {
       .fmts = fmts,
@@ -180,6 +202,7 @@ static void finish(struct capture *c)
       .source_app = c->source_app,
       .source_title = keep_title ? c->source_title : NULL,
       .group_id = route,
+      .title = verdict.title,
     };
     int64_t id = 0;
     enum add_result r = db_add_clip(app->db, &in, &id);
@@ -187,7 +210,13 @@ static void finish(struct capture *c)
       log_err("could not store clip");
     } else {
       log_debug("captured clip %lld (%zu formats, %s)", (long long)id, n, r == ADD_NEW ? "new" : "duplicate");
-      c->current_clip = id;
+      const char *e;
+      if (verdict.sticky >= 0) db_clip_set_sticky(app->db, id, verdict.sticky ? STICKY_TOP : STICKY_OFF, &e);
+      if (verdict.locked >= 0) db_clip_set_locked(app->db, id, verdict.locked, &e);
+      if (r == ADD_DUP && verdict.title) db_clip_set_title(app->db, id, verdict.title, &e);
+      /* The clip now differs from the selection only if a script rewrote
+       * its text; the clipboard still holds the original. */
+      c->current_clip = verdict.text ? 0 : id;
       app_emit_clip(app, r == ADD_NEW ? "clip.added" : "clip.updated", id);
       if (c->hook) {
         capture_hook hook = c->hook;
@@ -197,6 +226,7 @@ static void finish(struct capture *c)
       }
     }
   }
+  copy_verdict_free(&verdict);
   free(converted);
   abort_current(c);
 }
@@ -417,14 +447,27 @@ static void primary_store(struct capture *c)
   size_t len = c->primary_buf.len;
   bool blank = true;
   for (size_t i = 0; i < len && blank; i++) blank = t[i] == ' ' || t[i] == '\n' || t[i] == '\t' || t[i] == '\r';
-  if (!blank && utf8_valid((const uint8_t *)t, len)) {
-    struct fmt_in f = { MIME_TEXT, (const uint8_t *)t, len, mime_text_default_aliases, mime_text_default_alias_count };
-    struct clip_in in = { .fmts = &f, .n_fmts = 1, .source_app = c->primary_app,
-                          .group_id = rules_route_group(app->db, c->primary_app) };
+  struct copy_verdict v = { .sticky = -1, .locked = -1 };
+  struct fmt_in f = { MIME_TEXT, (const uint8_t *)t, len, mime_text_default_aliases, mime_text_default_alias_count };
+  if (!blank && utf8_valid((const uint8_t *)t, len) && app->scripts) {
+    scripts_on_copy(app->scripts, &f, 1, c->primary_app, NULL, &v);
+    if (v.text) { f.data = (const uint8_t *)v.text; f.len = strlen(v.text); }
+  }
+  if (!blank && !v.skip && utf8_valid((const uint8_t *)t, len)) {
+    int64_t group = rules_route_group(app->db, c->primary_app);
+    const char *gerr;
+    if (v.group) { int64_t g = db_group_ensure_path(app->db, v.group, &gerr); if (g > 0) group = g; }
+    struct clip_in in = { .fmts = &f, .n_fmts = 1, .source_app = c->primary_app, .group_id = group, .title = v.title };
     int64_t id;
     enum add_result r = db_add_clip(app->db, &in, &id);
-    if (r != ADD_ERR) app_emit_clip(app, r == ADD_NEW ? "clip.added" : "clip.updated", id);
+    if (r != ADD_ERR) {
+      const char *e;
+      if (v.sticky >= 0) db_clip_set_sticky(app->db, id, v.sticky ? STICKY_TOP : STICKY_OFF, &e);
+      if (v.locked >= 0) db_clip_set_locked(app->db, id, v.locked, &e);
+      app_emit_clip(app, r == ADD_NEW ? "clip.added" : "clip.updated", id);
+    }
   }
+  copy_verdict_free(&v);
   primary_stop(c);
 }
 

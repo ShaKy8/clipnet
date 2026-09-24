@@ -7,6 +7,7 @@
 #include "db.h"
 #include "hypr.h"
 #include "rules.h"
+#include "script.h"
 #include "settings.h"
 #include "transform.h"
 #include "util.h"
@@ -39,7 +40,24 @@ int paste_run(struct app *app, const struct paste_req *req, const char **err)
 
   int rc;
   int64_t credit = req->n_ids == 1 ? req->ids[0] : 0;
-  if (req->transform) {
+  /* on_paste scripts see the text about to be pasted into a known window;
+   * a replacement is pasted as plain text. Not for a copy without a paste
+   * (there is no target yet), nor for Special Paste or explicit text: the
+   * user already chose exactly what to paste. */
+  char *scripted = NULL;
+  if (req->send_keys && !req->transform && !req->text && app->scripts && scripts_have_paste(app->scripts)) {
+    struct buf base = { 0 };
+    join_texts(app, req, &base);
+    if (base.len) {
+      const char *target = app->hypr ? hypr_active_class(app->hypr) : NULL;
+      scripted = scripts_on_paste(app->scripts, credit, (char *)base.data, base.len, target);
+    }
+    buf_free(&base);
+  }
+  if (scripted) {
+    rc = serve_text(app->serve, scripted, strlen(scripted), credit);
+    free(scripted);
+  } else if (req->transform) {
     /* Special Paste works on text: the clips' text joined, then changed. */
     struct buf joined = { 0 };
     join_texts(app, req, &joined);

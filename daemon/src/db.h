@@ -116,6 +116,9 @@ int db_group_move(struct db *db, int64_t id, int64_t parent_id, const char **err
 /* cascade: delete the clips too; otherwise they return to plain history.
  * *affected lists the clip ids either way (caller frees). */
 int db_group_delete(struct db *db, int64_t id, bool cascade, int64_t **affected, size_t *n_affected, const char **err);
+/* The group at "Parent/Child/..." (names trimmed), creating what is missing.
+ * Returns its id, or -1 with *err set. */
+int64_t db_group_ensure_path(struct db *db, const char *path, const char **err);
 /* Every group, flat: [{id, uuid, parent_id, name, count}] in display order. */
 cJSON *db_groups_list(struct db *db);
 

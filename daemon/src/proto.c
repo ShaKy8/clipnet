@@ -17,6 +17,7 @@
 #include "mime.h"
 #include "paste.h"
 #include "rules.h"
+#include "script.h"
 #include "serve.h"
 #include "settings.h"
 #include "transform.h"
@@ -513,6 +514,53 @@ static void op_rules_reorder(struct call *k)
   ok(k, NULL);
 }
 
+/* ---- scripts (Phase 4) ----------------------------------------------- */
+
+static void op_scripts_list(struct call *k)
+{
+  cJSON *r = cJSON_CreateObject();
+  cJSON_AddStringToObject(r, "dir", scripts_dir(k->app->scripts));
+  cJSON_AddItemToObject(r, "scripts", scripts_list(k->app->scripts));
+  ok(k, r);
+}
+
+static void op_scripts_enable(struct call *k)
+{
+  const char *err = NULL;
+  if (scripts_enable(k->app->scripts, arg_str(k, "name"), cJSON_IsTrue(arg(k, "enabled")), &err) < 0) {
+    fail(k, "not_found", err);
+    return;
+  }
+  app_emit(k->app, "scripts.changed", NULL);
+  ok(k, NULL);
+}
+
+static void op_scripts_reload(struct call *k)
+{
+  scripts_reload(k->app->scripts);
+  app_emit(k->app, "scripts.changed", NULL);
+  ok(k, scripts_list(k->app->scripts));
+}
+
+static void op_scripts_test(struct call *k)
+{
+  int64_t id;
+  if (!arg_int(k, "id", 0, &id)) return;
+  const char *err = NULL;
+  cJSON *r = scripts_test(k->app->scripts, arg_str(k, "name"), arg_str(k, "hook"), id, &err);
+  if (!r) { fail(k, "bad_value", err); return; }
+  ok(k, r);
+}
+
+static void op_scripts_examples(struct call *k)
+{
+  const char *err = "the bundled examples were not found";
+  cJSON *r = k->app->examples_dir ? scripts_install_examples(k->app->scripts, k->app->examples_dir, &err) : NULL;
+  if (!r) { fail(k, "not_found", err); return; }
+  app_emit(k->app, "scripts.changed", NULL);
+  ok(k, r);
+}
+
 static void op_transforms(struct call *k)
 {
   size_t n;
@@ -695,6 +743,11 @@ static const struct {
   { "rules.set", op_rules_set },
   { "rules.delete", op_rules_delete },
   { "rules.reorder", op_rules_reorder },
+  { "scripts.list", op_scripts_list },
+  { "scripts.enable", op_scripts_enable },
+  { "scripts.reload", op_scripts_reload },
+  { "scripts.test", op_scripts_test },
+  { "scripts.install_examples", op_scripts_examples },
 };
 
 void proto_handle(struct app *app, struct ipc_client *c, const cJSON *req)

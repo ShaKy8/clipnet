@@ -36,6 +36,7 @@
 #include "loop.h"
 #include "proto.h"
 #include "serve.h"
+#include "script.h"
 #include "settings.h"
 #include "transform.h"
 #include "util.h"
@@ -190,6 +191,20 @@ int main(int argc, char **argv)
   app.ipc = ipc_listen(&app, socket_path);
   if (!app.ipc) return 1;
   app.buffers = buffers_new(&app);
+  char *script_dir = xdg_path("XDG_CONFIG_HOME", ".config", "clipnet/scripts");
+  app.scripts = scripts_new(&app, script_dir);
+  free(script_dir);
+  /* Bundled examples live next to the daemon's source tree. */
+  char exe[4096];
+  ssize_t el = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (el > 0) {
+    exe[el] = 0;
+    char *sep = strrchr(exe, '/');
+    if (sep) *sep = 0;                           /* .../daemon */
+    sep = strrchr(exe, '/');
+    if (sep) *sep = 0;                           /* the checkout */
+    app.examples_dir = xasprintf("%s/examples/scripts", exe);
+  }
   app.hotkeys = hotkeys_new(&app);
   if (app.hypr) hypr_on_reload(app.hypr, on_hypr_reload, app.hotkeys);
   hotkeys_prune(app.hotkeys);
@@ -212,6 +227,8 @@ int main(int argc, char **argv)
   app.ipc = NULL;
   hotkeys_free(app.hotkeys);
   buffers_free(app.buffers);
+  scripts_free(app.scripts);
+  free(app.examples_dir);
   capture_free(app.capture);
   serve_free(app.serve);
   hypr_disconnect(app.hypr);

@@ -71,8 +71,10 @@ def main():
     sockdir = tempfile.mkdtemp(prefix="clipnet-ipc.", dir=os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
     sock = os.path.join(sockdir, "s.sock")
     log = open(os.path.join(work, "log"), "w")
+    # Its own config dir: scripts must never land in the user's real one.
+    env = dict(os.environ, XDG_CONFIG_HOME=os.path.join(work, "config"))
     proc = subprocess.Popen([BIN, "--no-wayland", "--data", os.path.join(work, "data"), "--socket", sock, "-v"],
-                            stderr=log)
+                            stderr=log, env=env)
     try:
         for _ in range(100):
             if os.path.exists(sock):
@@ -180,6 +182,27 @@ def main():
         check("hotkey labels", labels.get(hk) == "paste buffer 2" and labels.get(pt) == "pause or resume recording")
         c.ok("hotkeys.remove", id=hk)
         c.ok("hotkeys.remove", id=pt)
+
+        # Scripts (Phase 4)
+        sl = c.ok("scripts.list")
+        check("scripts dir is the private one", sl["dir"] == os.path.join(work, "config", "clipnet", "scripts"))
+        check("no scripts yet", sl["scripts"] == [])
+        ex = c.call("scripts.install_examples")
+        if ex["ok"]:
+            check("examples installed", len(ex["result"]["added"]) == 4)
+            names = [x["name"] for x in c.ok("scripts.list")["scripts"]]
+            check("examples listed, all disabled", "skip-otp.lua" in names and
+                  not any(x["enabled"] for x in c.ok("scripts.list")["scripts"]))
+            c.ok("scripts.enable", name="skip-otp.lua", enabled=True)
+            check("enabled", any(x["name"] == "skip-otp.lua" and x["enabled"] for x in c.ok("scripts.list")["scripts"]))
+            otp = c.ok("create", text="482913")["id"]
+            t = c.ok("scripts.test", name="skip-otp.lua", hook="on_copy", id=otp)
+            check("dry run says skip", t["result"]["skip"] is True)
+            c.ok("scripts.enable", name="skip-otp.lua", enabled=False)
+            c.ok("delete", ids=[otp])
+        else:
+            check("examples missing only for a relocated binary", "not found" in ex["error"]["message"])
+        check("unknown script refused", not c.call("scripts.enable", name="nope.lua", enabled=True)["ok"])
 
         deleted = c.ok("delete", ids=[ids[3]])
         check("delete", deleted["deleted"] == 1)

@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import qs.common
 import "../components"
 import "../components/ui"
@@ -10,8 +11,13 @@ import "../common/Keys.js" as KeyNames
 FloatingWindow {
   id: win
 
+  Process { id: opener }
+
   property int page: 0
-  readonly property var pages: ["General", "Capture", "History", "Paste", "Buffers", "Rules", "Hotkeys", "Data"]
+  readonly property var pages: ["General", "Capture", "History", "Paste", "Buffers", "Rules", "Scripts", "Hotkeys", "Data"]
+  property var scriptList: []
+  property string scriptDir: ""
+  function loadScripts() { Daemon.call("scripts.list", {}, r => { if (r) { scriptList = r.scripts; scriptDir = r.dir } }) }
   property var hotkeyList: []
   property var groupList: []
   property var ruleList: []
@@ -33,6 +39,7 @@ FloatingWindow {
       if (name === "hotkeys.changed") win.loadHotkeys()
       else if (name === "groups.changed") win.loadGroups()
       else if (name === "rules.changed") win.loadRules()
+      else if (name === "scripts.changed") win.loadScripts()
       else if (name === "buffers.changed" || name.startsWith("clip")) win.loadBuffers()
     }
   }
@@ -49,7 +56,7 @@ FloatingWindow {
     nav.forceActiveFocus()
   }
 
-  onVisibleChanged: if (visible) { stats.load(); hotkeys.load(); loadHotkeys(); loadGroups(); loadRules(); loadBuffers() }
+  onVisibleChanged: if (visible) { stats.load(); hotkeys.load(); loadHotkeys(); loadGroups(); loadRules(); loadBuffers(); loadScripts() }
 
   // ---- navigation -----------------------------------------------------------
 
@@ -118,7 +125,7 @@ FloatingWindow {
     Item {
       id: content
       width: flick.width
-      height: [general, capture, history, paste, buffersPage, rulesPage, hotkeysPage, data][win.page].height
+      height: [general, capture, history, paste, buffersPage, rulesPage, scriptsPage, hotkeysPage, data][win.page].height
 
       // ---- General ----------------------------------------------------------
       Column {
@@ -436,10 +443,149 @@ FloatingWindow {
         Component { id: menuComp; Menu {} }
       }
 
+      // ---- Scripts ----------------------------------------------------------
+      Column {
+        id: scriptsPage
+        visible: win.page === 6
+        width: parent.width
+        spacing: Theme.px(22)
+
+        property string testName: ""
+        property var testClip: null
+        property var testResult: null
+
+        Section {
+          title: "Scripts"
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            text: "Lua scripts that change or skip clips as they are copied (on_copy) or pasted (on_paste). Put .lua files in " +
+                  (win.scriptDir || "~/.config/clipnet/scripts") + ". Each starts off; test it below, then switch it on. The guide is docs/SCRIPTING.md."
+            color: Theme.dim
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSize - 1
+          }
+          Row {
+            spacing: Theme.px(8)
+            Btn { text: "Install examples"; onClicked: Daemon.call("scripts.install_examples", {}, (r, err) => scriptMsg.text = err ? err.message : (r.added.length ? "Added " + r.added.join(", ") + " (switched off)." : "The examples are already there.")) }
+            Btn { text: "Open folder"; onClicked: { opener.command = ["xdg-open", win.scriptDir]; opener.running = true } }
+            Btn { text: "Reload"; onClicked: Daemon.call("scripts.reload", {}, () => win.loadScripts()) }
+          }
+          Text {
+            id: scriptMsg
+            visible: !!text
+            width: parent.width
+            wrapMode: Text.Wrap
+            color: Theme.dim
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSize - 1
+          }
+          Repeater {
+            model: win.scriptList
+            Column {
+              required property var modelData
+              width: parent.width
+              spacing: Theme.px(2)
+              Row {
+                width: parent.width
+                spacing: Theme.px(8)
+                Toggle {
+                  width: parent.width - testBtn.width - Theme.px(8)
+                  text: modelData.name + (modelData.hooks.length ? "  \u00b7  " + modelData.hooks.join(", ") : "")
+                  checked: modelData.enabled
+                  onToggled: c => Daemon.call("scripts.enable", { name: modelData.name, enabled: c }, () => win.loadScripts())
+                }
+                Btn {
+                  id: testBtn
+                  text: "Test\u2026"
+                  onClicked: { scriptsPage.testName = modelData.name; scriptsPage.testResult = null }
+                }
+              }
+              Text {
+                visible: !!modelData.error
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "\u26a0 " + modelData.error
+                color: Theme.urgent
+                font.family: Theme.fontFamily
+                font.pixelSize: Theme.fontSize - 2
+              }
+            }
+          }
+          Text {
+            visible: !win.scriptList.length
+            text: "No scripts yet."
+            color: Theme.dim
+            font.family: Theme.fontFamily
+            font.pixelSize: Theme.fontSize
+          }
+        }
+
+        Section {
+          visible: !!scriptsPage.testName
+          title: "Test " + scriptsPage.testName
+          Row {
+            spacing: Theme.px(8)
+            Btn {
+              text: scriptsPage.testClip ? "Clip: " + (scriptsPage.testClip.title || scriptsPage.testClip.preview).substring(0, 40) : "Choose a clip\u2026"
+              onClicked: Daemon.call("list", { limit: 15 }, (r) => {
+                if (!r) return
+                const items = r.rows.map(c => ({ label: (c.title || c.preview).substring(0, 60), action: "clip", data: c }))
+                const m = scriptMenu.createObject(content, { items: items, px: Theme.px(40), py: Theme.px(40) })
+                m.triggered.connect((a, d) => { scriptsPage.testClip = d; m.destroy() })
+                m.closed.connect(() => m.destroy())
+                m.focusMenu()
+              })
+            }
+            Repeater {
+              model: ["on_copy", "on_paste"]
+              Btn {
+                required property string modelData
+                text: "Run " + modelData
+                enabled: !!scriptsPage.testClip
+                opacity: enabled ? 1 : 0.4
+                onClicked: Daemon.call("scripts.test", { name: scriptsPage.testName, hook: modelData, id: scriptsPage.testClip.id },
+                                       (r, err) => scriptsPage.testResult = err ? { error: err.message } : r)
+              }
+            }
+          }
+          Rectangle {
+            visible: !!scriptsPage.testResult
+            width: parent.width
+            height: resultText.implicitHeight + Theme.px(16)
+            radius: Math.min(Theme.radius, 6)
+            color: Theme.faint
+            TextEdit {
+              id: resultText
+              x: Theme.px(8)
+              y: Theme.px(8)
+              width: parent.width - Theme.px(16)
+              readOnly: true
+              selectByMouse: true
+              wrapMode: TextEdit.Wrap
+              color: scriptsPage.testResult && scriptsPage.testResult.error ? Theme.urgent : Theme.text
+              font.family: Theme.fontFamily
+              font.pixelSize: Theme.fontSize - 1
+              text: {
+                const r = scriptsPage.testResult
+                if (!r) return ""
+                const lines = []
+                if (r.error) lines.push("Error: " + r.error)
+                if (r.result !== undefined) lines.push("Result: " + (r.result === null ? "unchanged" : JSON.stringify(r.result, null, 2)))
+                if (r.log && r.log.length) lines.push("Log:\n  " + r.log.join("\n  "))
+                if (r.ms !== undefined) lines.push(r.ms + " ms")
+                return lines.join("\n")
+              }
+            }
+          }
+        }
+        Component { id: scriptMenu; Menu {} }
+      }
+
       // ---- Hotkeys ----------------------------------------------------------
       Column {
         id: hotkeysPage
-        visible: win.page === 6
+        visible: win.page === 7
         width: parent.width
         spacing: Theme.px(22)
         Section {
@@ -516,7 +662,7 @@ FloatingWindow {
       // ---- Data -------------------------------------------------------------
       Column {
         id: data
-        visible: win.page === 7
+        visible: win.page === 8
         width: parent.width
         spacing: Theme.px(22)
         Section {

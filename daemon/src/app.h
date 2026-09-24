@@ -26,6 +26,7 @@ struct capture;
 struct serve;
 struct hotkeys;
 struct buffers;
+struct scripts;
 
 struct app {
   struct loop *loop;
@@ -37,6 +38,8 @@ struct app {
   struct serve *serve;
   struct hotkeys *hotkeys;
   struct buffers *buffers;
+  struct scripts *scripts;
+  char *examples_dir;     /* <checkout>/examples/scripts */
 
   char *runtime_dir;     /* $XDG_RUNTIME_DIR/clipnet */
   char *socket_path;

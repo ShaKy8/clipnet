@@ -49,7 +49,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-"$BIN" --data "$WORK/data" --socket "$SOCK" -v 2> "$WORK/log" &
+XDG_CONFIG_HOME="$WORK/config" "$BIN" --data "$WORK/data" --socket "$SOCK" -v 2> "$WORK/log" &
 pid=$!
 for _ in $(seq 50); do [[ -S $SOCK ]] && break; sleep 0.05; done
 ctl() { "$BIN" --socket "$SOCK" --ctl "$1"; }
@@ -180,6 +180,34 @@ check "PRIMARY clip holds the text" test "$(ctl '{"op":"list","limit":1}' | jq -
 wait "$opid" || true
 ctl '{"op":"settings.set","key":"capture_primary","value":false}' >/dev/null
 before=$((before + 1))
+
+echo "live: scripts see real copies and pastes"
+mkdir -p "$WORK/config/clipnet/scripts"
+cat > "$WORK/config/clipnet/scripts/10-live.lua" <<'LUA'
+function on_copy(clip)
+  if clip.text == "script-skip-me" then return false end
+  if clip.text == "script-rewrite-me" then return { text = "rewritten by script", title = "scripted" } end
+end
+function on_paste(clip, target)
+  if clip.text == "paste-marker" then return "pasted by script" end
+end
+LUA
+ctl '{"op":"scripts.enable","name":"10-live.lua","enabled":true}' >/dev/null
+printf 'script-skip-me' | wlcopy
+sleep 0.4
+check "on_copy false: not stored" wait_count "$before"
+printf 'script-rewrite-me' | wlcopy
+check "on_copy rewrite: stored" wait_count $((before + 1))
+srow=$(ctl '{"op":"list","limit":1}' | jq '.rows[0]')
+check "stored text is the script's" test "$(jq -r .preview <<<"$srow")" = "rewritten by script"
+check "stored title is the script's" test "$(jq -r .title <<<"$srow")" = "scripted"
+check "the clipboard itself is untouched" test "$(wl-paste -n)" = "script-rewrite-me"
+pid_marker=$(ctl '{"op":"create","text":"paste-marker"}' | jq .id)
+ctl "{\"op\":\"copy\",\"ids\":[$pid_marker]}" >/dev/null
+sleep 0.1
+check "copy (no paste) is not scripted" test "$(wl-paste -n)" = "paste-marker"
+ctl '{"op":"scripts.enable","name":"10-live.lua","enabled":false}' >/dev/null
+before=$((before + 2))
 
 echo "live: keep-alive never touches a clipboard someone else owns"
 printf 'still owned' | wlcopy

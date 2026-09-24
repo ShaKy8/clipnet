@@ -94,6 +94,11 @@ Returned by `list`, `get`, and the `clip.added` / `clip.updated` events:
 | `rules.set` | `id` (0 = new), `action`, `match_app`, `match_mime`, `arg`, `enabled` | `{id}` |
 | `rules.delete` | `id` | null |
 | `rules.reorder` | `ids` | null. The named rules go first, the rest keep their order |
+| `scripts.list` | | `{dir, scripts: [{name, enabled, hooks, error}]}` |
+| `scripts.enable` | `name`, `enabled` | null |
+| `scripts.reload` | | the list, after dropping every loaded script |
+| `scripts.test` | `name`, `hook` (`on_copy`\|`on_paste`), `id` (a clip) | `{result, log, ms, error?}`, a dry run that works while disabled |
+| `scripts.install_examples` | | `{added: [names], dir}`; never overwrites |
 
 When `paste` or `copy` gets several ids, the clips' text is joined with
 `separator` (default: the `multi_separator` setting) and pasted as a single
@@ -117,7 +122,7 @@ never include clip text, only a title the user set or the clip's number.
 ## Events
 
 `clip.added`, `clip.updated` (a row), `clip.deleted` (`{id}`), `groups.changed`,
-`hotkeys.changed`, `rules.changed`, `buffers.changed` (`{slot}`), `clips.reset`
+`hotkeys.changed`, `rules.changed`, `scripts.changed`, `buffers.changed` (`{slot}`), `clips.reset`
 (reload everything: after an import or retention), `state.changed`
 (`{paused, paused_until}`), `settings.changed` (`{key, value}`).
 
